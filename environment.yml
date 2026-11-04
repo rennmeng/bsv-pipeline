@@ -1,0 +1,24 @@
+# Conda environment: one command installs the full stack (pinned versions)
+#
+#   conda env create -f environment.yml
+#   conda activate bsv-pipeline
+#
+# Provides rMATS 4.3.0 (with STAR 2.7.10b) + BioSpliceView + analysis deps.
+# DIA-NN is not installed here (license/binary); STAGE 0 handles it as
+# configured.
+name: bsv-pipeline
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.10
+  # ---- pinned versions ----
+  - rmats=4.3.0                   # rMATS-turbo (constrains numpy<2.0)
+  - star=2.7.10b                  # aligner (version verified at STAGE 0)
+  - pip
+  - pip:
+      - -r requirements.txt       # pandas / numpy / scipy / openpyxl / pyfaidx / biopython
+      # ---- BioSpliceView ----
+      # mirror by default; if GitHub is reachable, switch to:
+      #   - git+https://github.com/rennmeng/BioSpliceView.git
+      - https://www.spliceview.cn/static/files/main.tar.gz

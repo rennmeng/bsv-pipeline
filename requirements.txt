@@ -1,0 +1,11 @@
+# Python dependencies for the BioSpliceView end-to-end pipeline
+# (stages: merge_db.py, summarize_splice_peptides.py, BioSpliceView core)
+#
+# rMATS itself comes from conda, not pip (see environment.yml).
+
+pandas>=1.3
+numpy>=1.21
+scipy>=1.9
+openpyxl>=3.0
+pyfaidx>=0.7
+biopython>=1.79
