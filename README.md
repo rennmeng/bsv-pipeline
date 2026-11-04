@@ -125,14 +125,6 @@ Publicly available paired-end RNA-seq datasets with two condition groups are
 suitable for evaluation; two replicates per group complete within
 approximately one hour:
 
-- **SRP111619** — mouse macrophages, IL-10 knockout versus wild type.
-  FASTQ files can be obtained with the
-  [SRA Toolkit](https://github.com/ncbi/sra-tools)
-  (`fasterq-dump --split-files`) and renamed to the `WT-*` / `KO-*` scheme
-  described above.
-- **GSE133399** — mouse liver RNA-seq with substantial alternative splicing
-  (GEO); the same renaming applies.
-
 Stage 4 additionally requires mass-spectrometry acquisitions (Bruker `.d` or
 Thermo `.raw`) from matching conditions, placed in the directory given by
 `ms_dir`.
