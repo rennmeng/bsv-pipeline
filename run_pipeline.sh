@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  BioSpliceView end-to-end splicing pipeline (standalone)
+#  bsv-pipeline end-to-end splicing pipeline (standalone)
 #
 #  FASTQ/BAM -> rMATS -> BioSpliceView -> search DB -> DIA-NN -> summary
 #
@@ -836,7 +836,7 @@ IS_FULL=1; [[ "$PIPELINE_MODE" == "splicing" ]] && IS_FULL=0
 STAGE_TOTAL=5; [[ "$PIPELINE_MODE" == "splicing" ]] && STAGE_TOTAL=2
 
 echo ""
-headline "${B}${CYAN}BioSpliceView${R} ${DIM}─${R} ${B}${WHITE}end-to-end splicing pipeline${R}"
+headline "${B}${CYAN}bsv-pipeline${R} ${DIM}─${R} ${B}${WHITE}end-to-end splicing pipeline${R}"
 echo -e "  ${DIM}FASTQ ${UI_ARROW} rMATS ${UI_ARROW} BioSpliceView ${UI_ARROW} search DB ${UI_ARROW} DIA-NN ${UI_ARROW} summary${R}"
 kv "job:" "${B}${WHITE}$job_id${R}   ${DIM}mode: $PIPELINE_MODE (stages 1-$STAGE_TOTAL)${R}"
 kv "workdir:" "$work_dir ${DIM}(ref/ = shared cache, jobs/$job_id/ = this job)${R}"

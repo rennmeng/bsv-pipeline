@@ -1,6 +1,6 @@
-# BioSpliceView: An End-to-End Pipeline for Splice-Peptide Evidence
+# bsv-pipeline: An End-to-End Pipeline for Splice-Peptide Evidence
 
-BioSpliceView integrates transcriptomic and proteomic analysis into a single,
+bsv-pipeline integrates transcriptomic and proteomic analysis into a single,
 resumable workflow: alternative splicing events are quantified with rMATS,
 annotated at the protein level with BioSpliceView, and the resulting
 splice-derived protein sequences are interrogated for peptide evidence by
@@ -43,7 +43,7 @@ work directory.
 A Docker image is provided as an alternative:
 
 ```bash
-docker build -t biospliceview-pipeline:1.0 .
+docker build -t bsv-pipeline:1.0 .
 ```
 
 ## Quick start
@@ -78,7 +78,7 @@ echoed as a `cmd:` line before execution.
 An equivalent Docker invocation:
 
 ```bash
-docker run --rm -v /data:/data biospliceview-pipeline:1.0 /data/pipeline.conf
+docker run --rm -v /data:/data bsv-pipeline:1.0 /data/pipeline.conf
 ```
 
 ## Tool provisioning

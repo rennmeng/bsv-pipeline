@@ -1,7 +1,7 @@
 # ============================================================
-# BioSpliceView end-to-end pipeline image
+# bsv-pipeline end-to-end pipeline image
 #
-#   docker build -t biospliceview-pipeline:1.0 .
+#   docker build -t bsv-pipeline:1.0 .
 #
 # In the image: rMATS 4.3.0 + STAR 2.7.10b (bioconda) + BioSpliceView
 # (dual-source download). DIA-NN is not baked in: on first run the pipeline
@@ -11,7 +11,7 @@
 # ============================================================
 FROM mambaorg/micromamba:1.5-jammy
 
-LABEL org.opencontainers.image.title="BioSpliceView end-to-end pipeline" \
+LABEL org.opencontainers.image.title="bsv-pipeline end-to-end pipeline" \
       org.opencontainers.image.description="FASTQ/BAM → rMATS 4.3.0 → BioSpliceView → search DB → DIA-NN 2.6.1 → splice-peptide summary" \
       org.opencontainers.image.source="https://github.com/rennmeng/BioSpliceView"
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-bsvterm.py — shared terminal-style helpers for the BioSpliceView pipeline
+bsvterm.py — shared terminal-style helpers for the bsv-pipeline
 helper scripts (merge_db.py, summarize_splice_peptides.py).
 
 Output standard (identical to run_pipeline.sh so Bash and Python lines
