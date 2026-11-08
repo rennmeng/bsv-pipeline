@@ -5,24 +5,26 @@
 # Usage:
 #   bash build_star_index.sh <genome.fa> <annotation.gtf> <out_dir> [threads]
 #   STAR_BIN=/path/to/STAR bash build_star_index.sh ...   # explicit STAR
-# (run_pipeline.sh passes the resolved STAR path via STAR_BIN automatically)
+# (run_pipeline.sh passes the resolved STAR path via STAR_BIN automatically,
+# and sets READ_LENGTH_OVERRIDE=<read_length-1> so sjdbOverhang follows the
+# configured library read length; the 149 default matches 150 bp reads)
 set -euo pipefail
 FA="${1:?genome fasta}"; GTF="${2:?annotation gtf}"; OUT="${3:?output dir}"; T="${4:-8}"
 # STAR_BIN (or star_bin) - full path to the STAR executable; bare "STAR"
 # only works when it is already on PATH
 STAR_BIN="${STAR_BIN:-${star_bin:-STAR}}"
 if [[ ! -x "$STAR_BIN" ]] && ! command -v "$STAR_BIN" >/dev/null 2>&1; then
-    echo "[FAIL] STAR not found: $STAR_BIN"
+    echo "FAIL  STAR not found: $STAR_BIN"
     exit 1
 fi
-[[ -f "$FA"  ]] || { echo "[FAIL] not found: $FA";  exit 1; }
-[[ -f "$GTF" ]] || { echo "[FAIL] not found: $GTF"; exit 1; }
+[[ -f "$FA"  ]] || { echo "FAIL  not found: $FA";  exit 1; }
+[[ -f "$GTF" ]] || { echo "FAIL  not found: $GTF"; exit 1; }
 mkdir -p "$OUT"
-echo "[RUN ] STAR genomeGenerate ($(basename "$STAR_BIN")) threads=$T ..."
+echo "RUN  STAR genomeGenerate ($(basename "$STAR_BIN")) threads=$T ..."
 "$STAR_BIN" --runMode genomeGenerate \
      --genomeDir "$OUT" \
      --genomeFastaFiles "$FA" \
      --sjdbGTFfile "$GTF" \
      --sjdbOverhang "${READ_LENGTH_OVERRIDE:-149}" \
      --runThreadN "$T"
-echo "[ OK ] STAR index ready: $OUT"
+echo "OK  STAR index ready: $OUT"

@@ -20,16 +20,16 @@ OUT="${2:?missing output path}"
 case "${SPECIES,,}" in
   mouse) MIRROR_FILE="uniprotkb_AND_model_organism_10090_AND_2026_10_27.fasta.gz" ;;
   human) MIRROR_FILE="uniprotkb_AND_reviewed_true_AND_model_o_2026_10_27.fasta.gz" ;;
-  *) echo "[FAIL] unknown species: $SPECIES (supported: mouse / human)"; exit 1 ;;
+  *) echo "FAIL  unknown species: $SPECIES (supported: mouse / human)"; exit 1 ;;
 esac
 
 URL="${PROTEOME_URL:-https://www.spliceview.cn/static/files/${MIRROR_FILE}}"
 
 command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 \
   || command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1 || {
-  echo "[FAIL] need curl / wget / python (any one) for downloading"; exit 1; }
+  echo "FAIL  need curl / wget / python (any one) for downloading"; exit 1; }
 
-echo "[RUN ] Downloading background proteome (species=${SPECIES})"
+echo "RUN  Downloading background proteome (species=${SPECIES})"
 echo "       source: $URL"
 RATE_ARGS=()
 [[ -n "${DL_RATE_LIMIT-}" ]] && RATE_ARGS=(--limit-rate "$DL_RATE_LIMIT")
@@ -51,14 +51,14 @@ for attempt in range(3):
         urllib.request.urlretrieve(sys.argv[1], sys.argv[2])
         sys.exit(0)
     except Exception as e:
-        print(f"[WARN] download attempt {attempt + 1}/3 failed: {e}", file=sys.stderr)
+        print(f"WARN  download attempt {attempt + 1}/3 failed: {e}", file=sys.stderr)
 sys.exit(1)
 PY
     fi
 fi
 if [[ "$DL_OK" != "1" || ! -s "${OUT}.part" ]]; then
     rm -f "${OUT}.part"
-    echo "[FAIL] download failed: $URL"
+    echo "FAIL  download failed: $URL"
     echo "       check the mirror and the file name above"
     exit 1
 fi
@@ -71,4 +71,4 @@ else
     mv "${OUT}.part" "$OUT"
 fi
 N="$(grep -c '^>' "$OUT" || true)"
-echo "[ OK ] Background proteome ready: $OUT (${N} sequences)"
+echo "OK  Background proteome ready: $OUT (${N} sequences)"

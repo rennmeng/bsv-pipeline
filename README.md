@@ -14,7 +14,7 @@ FASTQ/BAM → rMATS → BioSpliceView → search DB → DIA-NN → peptide summa
 
 | Path | Purpose |
 |---|---|
-| `run_pipeline.sh` | Five-stage driver; resumable in place, colored per-stage output (`NO_COLOR=1` disables color) |
+| `run_pipeline.sh` | Five-stage driver; resumable in place, colored per-stage output (`NO_COLOR=1` disables color, `NO_UNICODE=1` forces ASCII) |
 | `template/` | Configuration templates: `full.conf` (Stages 1–5) and `splicing.conf` (Stages 1–2 only) |
 | `scripts/build_star_index.sh` | STAR genome index construction (~30 GB per organism; invoked automatically when absent) |
 | `scripts/merge_db.py` | Merges the background proteome with splice-derived sequences into a combined search database, with per-event annotation |
@@ -58,13 +58,22 @@ bash run_pipeline.sh pipeline.conf
 
 The configuration file is read with `source`, i.e. interpreted as Bash:
 quote values containing spaces, and keep `job_id` to letters, digits, dot,
-dash and underscore (it is used as a path prefix).
+dash and underscore (it is used as a path prefix; the pipeline validates
+this and refuses anything else). Paths themselves must not contain spaces
+or commas - sample and file lists are comma-separated, and most path
+values are re-joined into such lists.
 
 Results are written to `<work_dir>/jobs/<job_id>/final/`, with
 `<job_id>_peptide_summary.xlsx` as the principal deliverable. Interrupted or
 parameter-modified runs resume from the work directory: completed stages are
 detected and skipped, so rerunning the same command continues where the
 previous run left off.
+
+Terminal output follows one convention across the Bash driver and the
+Python helpers: 4-character tags (`OK`, `RUN`, `SKIP`, `HAVE`, `INFO`,
+`WARN`, `FAIL`) followed by two spaces, indented notes, boxed stage
+banners and per-phase progress bars. Every assembled tool command is
+echoed as a `cmd:` line before execution.
 
 An equivalent Docker invocation:
 
@@ -95,6 +104,7 @@ automatically:
 | Component | Automatic provisioning |
 |---|---|
 | DIA-NN 2.6.1 | Downloaded to `<work_dir>/ref/diann/` during Stage 0, after the proteome fetch and in parallel with index construction and alignment; reused by subsequent runs |
+| .NET runtime | Provisioned at Stage 0 alongside DIA-NN (into the conda environment; falls back to `<work_dir>/ref/dotnet/`); needed only when Thermo `.raw` files are present — Bruker `.d` files do not require it. The major version is auto-detected from DIA-NN's `RawWrapper.runtimeconfig.json` (default 8.0) and channels install side by side. A distro-packaged `dotnet` without the wanted major triggers the pinned installation, and `DOTNET_ROOT` is always exported pointing at the directory that hosts the runtime (`host/fxr/…`) — pointing it at the bare `dotnet` binary or leaving it unset is what produces `hostfxr init failed: 0x80008096`. On a Stage-4 search failure with `.raw` inputs the pipeline installs a clean pinned runtime and retries the search once |
 | STAR and rMATS | Provided by the conda environment; the STAR version is verified at startup (2.7.10b is fixed internally and is not a user setting) |
 | BioSpliceView | Installed with the conda environment |
 | Background proteome | Downloaded from the project mirror (mouse: 17,283 reviewed entries; human: 20,431) to `<work_dir>/ref/uniprot_<species>.fasta` |
@@ -124,6 +134,14 @@ discovery.
 Publicly available paired-end RNA-seq datasets with two condition groups are
 suitable for evaluation; two replicates per group complete within
 approximately one hour:
+
+- **SRP111619** — mouse macrophages, IL-10 knockout versus wild type.
+  FASTQ files can be obtained with the
+  [SRA Toolkit](https://github.com/ncbi/sra-tools)
+  (`fasterq-dump --split-files`) and renamed to the `WT-*` / `KO-*` scheme
+  described above.
+- **GSE133399** — mouse liver RNA-seq with substantial alternative splicing
+  (GEO); the same renaming applies.
 
 Stage 4 additionally requires mass-spectrometry acquisitions (Bruker `.d` or
 Thermo `.raw`) from matching conditions, placed in the directory given by
@@ -182,19 +200,33 @@ receives `--matrices` (unless already present in the string); without it
 DIA-NN does not produce the `report.pr_matrix.tsv` the summary stage
 requires. This flag enables the
 DDA-identification-aided workflow, in which `--f` inputs are interpreted as
-DDA runs; DIA runs would then be supplied via `--f-dia`, and DDA-only
+DDA runs; DIA runs are then supplied via `--f-dia` by listing them in
+`group1_dia_ms_files` / `group2_dia_ms_files` (the pipeline emits the flag
+itself; these lists are never auto-discovered from `ms_dir`), and DDA-only
 analyses receive a "no DIA data files provided" notice, which is
 informational. For quantitative timsTOF data, DIA-NN recommends additionally
 `--reanalyse` (match-between-runs) together with fixed mass accuracies of
-10–15 ppm (`--mass-acc-ms1`, `--mass-acc`). These search-only options
-apply to 4b only; library generation (4a) runs without them. Note that
-MBR requires at least two input files - with a single acquisition
-DIA-NN reports "MBR turned off".
+10–15 ppm (`--mass-acc-ms1`, `--mass-acc`). All of these are search-only
+options: they are applied to 4b only, while library generation (4a) runs
+with the library-relevant subset (`--threads --verbose --met-excision
+--min-pep-len --max-pep-len --min-pr-mz --max-pr-mz --min-pr-charge
+--max-pr-charge --cut --missed-cleavages --unimod4`). Passing the search-
+only flags to 4a is at best redundant and at worst pathological (with
+`--semi` the in-silico digest balloons, stretching 4a from minutes to
+hours). To set the 4a flags directly, use `diann_lib_params` - that string
+is passed verbatim to the library pass instead of the auto-derived subset
+(the pipeline still appends `--fasta`, `--out-lib` and the core library
+flags `--fasta-search --gen-spec-lib --predictor`; include `--threads`
+yourself). Changing it reruns 4a on resume; unset keeps the
+auto-derivation. Note that MBR requires at least two input files - with a
+single acquisition DIA-NN reports "MBR turned off".
 
 Each assembled command is echoed as a `cmd:` line before execution, so the
-effective DIA-NN invocation is fully transparent. During 4b the live progress
-counts two passes per raw file (pre-processing, then analysis), so six files
-show as 12 passes.
+effective DIA-NN invocation is fully transparent. During 4b the live
+progress counts FILES - DIA-NN first pre-processes every input, then
+analyses them, and the bar reports each phase separately (e.g.
+`3/6 pre-processing` switching to `1/6 analysis`), so six files never
+inflate into twelve merged "passes".
 
 ## Version pinning
 
@@ -221,16 +253,19 @@ back to a built-in default.
 | `fastq_dir` | 1 | FASTQ directory; samples are paired by `<group>` prefix | — |
 | `group1` / `group2` | 1, 4, 5 | group names, used as sample filename prefixes | — |
 | `group1_samples` / `group2_samples` | 1 | explicit `R1:R2` lists; override prefix discovery | auto |
-| `threads` / `job_id` | all | worker threads / output prefix (DIA-NN `--threads` follows the same value) | 16 / — |
+| `threads` / `job_id` | all | worker threads (rMATS, the STAR index build and the default `diann_params` string) / output prefix (letters, digits, dot, dash, underscore) | 16 / — |
 | `read_type` / `read_length` | 1 | rMATS library type and read length | `paired` / 150 |
 | `fdr` / `psi` / `minjc` | 2 | BioSpliceView event filters | 0.05 / 0.05 / 10 |
 | `species` | 3 | background proteome species (`mouse` or `human`) | — |
 | `uniprot_fasta` | 3 | explicit background FASTA; overrides `species` | — |
 | `min_aa` | 3 | minimum splice-protein length in amino acids | 10 |
+| `bsv_sheet` | 3 | BioSpliceView results sheet consumed by Stage 3 | `All_Significant` |
 | `ms_dir` | 4 | directory of MS raw files (`.d` / `.raw`) | — |
 | `group1_ms_files` / `group2_ms_files` | 4 | explicit MS file lists; override prefix discovery | auto |
+| `group1_dia_ms_files` / `group2_dia_ms_files` | 4 | explicit DIA file lists for the DDA-aided workflow (passed as `--f-dia`); require `--dda` in `diann_params`; never auto-discovered and excluded from the DDA set | — |
 | `diann_bin` | 4 | DIA-NN binary (auto-installed when unset; version pinned internally at 2.6.1) | 2.6.1 |
 | `diann_params` | 4 | DIA-NN tuning flags, passed verbatim to both commands | built-in defaults |
+| `diann_lib_params` | 4 | explicit library-pass (4a) flags, used verbatim; unset = auto-derived from `diann_params` | auto |
 | `p_cutoff` | 5 | nominal p-value threshold for the summary | 0.05 |
 | `dl_rate_limit` | all | per-transfer download rate cap (internal default: 2 MB/s; override when needed) | `2m` |
 | `rmats_py` / `star_bin` | 0 | explicit tool paths; environment and `PATH` fallbacks apply (`diann_bin` likewise in the already-installed section) | auto |
@@ -243,21 +278,29 @@ back to a built-in default.
    genome FASTA and GTF, and the background proteome must originate from the
    same species and genome assembly; a mismatched GTF silently degrades
    `Match_Status` toward PARTIAL/ANCHOR_ONLY.
-2. **Mass-spectrometry file naming is independent of the transcriptome.**
-   With `ms_dir` set, `.d`/`.raw` files are scanned by group prefix
-   (case-sensitive). Unprefixed files are assigned to a group only when
-   their count exactly matches that group's FASTQ replicate count, and every
-   assignment is reported at Stage 0; ambiguous cases abort the run rather
-   than being guessed. `report.pr_matrix.tsv` columns carry the original file
-   names and are matched automatically at Stage 5.
+2. **Mass-spectrometry files need no naming convention.** With `ms_dir` set,
+   every `.d`/`.raw` file found is used as-is. When the filenames happen to
+   carry the group prefixes, files are grouped by name; otherwise the sorted
+   file list is split positionally (the first N1 files go to group1, the
+   rest to group2, where N1/N2 are the groups' FASTQ replicate counts).
+   Files listed in `group1_dia_ms_files` / `group2_dia_ms_files` (DDA-aided
+   mode) are excluded from this set and enter the search via `--f-dia`
+   instead.
+   Every assignment is printed at Stage 0 with a per-file mapping, so it can
+   be verified at a glance; explicit `group1_ms_files` / `group2_ms_files`
+   lists override the automatic split. `report.pr_matrix.tsv` columns carry
+   the original file names and are matched automatically at Stage 5.
 
 ## Statistical notes
 
 The summary stage applies nominal (uncorrected) two-sided Welch t-tests with
-pairwise exclusion of missing values. A single-group detection (all
-replicates of one group, none of the other) is flagged with a placeholder
-p-value of 1e-10 and infinite log2 fold change
-(`Detection_Pattern=Single_group_all`). The resulting
+pairwise exclusion of missing values; the `log2FC` columns are
+log2(group2/group1), i.e. positive means higher abundance in group 2, and a
+Benjamini-Hochberg adjusted column (`p_adj_BH`) is provided for reference
+while candidate selection keeps the nominal cutoff. A single-group
+detection (all replicates of one group, none of the other) is flagged with
+a placeholder p-value of 1e-10 and an infinite log2FC signed toward the
+detecting group (`Detection_Pattern=Single_group_all`). The resulting
 `*_peptide_summary.xlsx` is intended as an exploratory candidate screen;
 candidate splice peptides warrant targeted mass spectrometry or synthetic
 peptide validation.

@@ -38,9 +38,9 @@ dl() {  # dl <url> <output> <tries>  -> 0 success / 1 failure
         total="$(curl -fsIL --connect-timeout 10 --max-time 20 "$url" 2>/dev/null | awk '{gsub(/\r/, ""); if (tolower($1) == "content-length:") v = $2} END {print v}' | tail -n1)"
         for ((i = 1; i <= tries; i++)); do
             if [[ -n "$total" ]]; then
-                echo "[RUN ] Downloading ($i/$tries, $((total / 1048576)) MB): $url"
+                echo "RUN  Downloading ($i/$tries, $((total / 1048576)) MB): $url"
             else
-                echo "[RUN ] Downloading ($i/$tries): $url"
+                echo "RUN  Downloading ($i/$tries): $url"
             fi
             # fast-fail: 15 s connect probe; abort if stalled (<1 KB/s for 30 s)
             start=$SECONDS
@@ -63,7 +63,7 @@ dl() {  # dl <url> <output> <tries>  -> 0 success / 1 failure
                 if [[ "$sz" == "$last" ]]; then
                     stuck=$((stuck + 15))
                     if (( stuck >= 30 )); then
-                        echo "[WARN] stalled at $((sz / 1024)) KB - aborting attempt"
+                        echo "WARN  stalled at $((sz / 1024)) KB - aborting attempt"
                         kill "$cpid" 2>/dev/null || true
                         break
                     fi
@@ -76,9 +76,9 @@ dl() {  # dl <url> <output> <tries>  -> 0 success / 1 failure
                         local bar="" j
                         for ((j = 0; j < filled; j++)); do bar+="#"; done
                         for ((j = 0; j < emp;  j++)); do bar+="."; done
-                        echo "[....] [${bar}] ${pct}%  ($((sz / 1048576))/$((total / 1048576)) MB)"
+                        echo "       [${bar}] ${pct}%  ($((sz / 1048576))/$((total / 1048576)) MB)"
                     else
-                        echo "[....] received $((sz / 1024)) KB"
+                        echo "       received $((sz / 1024)) KB"
                     fi
                 fi
             done
@@ -86,16 +86,16 @@ dl() {  # dl <url> <output> <tries>  -> 0 success / 1 failure
             rm -f "${out}.pid" 2>/dev/null || true
             if [[ $rc -eq 0 && -s "$out" ]]; then
                 sz2=0; [[ -f "$out" ]] && sz2=$(wc -c < "$out" 2>/dev/null || echo 0)
-                echo "[ OK ] received $((sz2 / 1024)) KB in $(( ${SECONDS:-0} - start ))s"
+                echo "OK  received $((sz2 / 1024)) KB in $(( ${SECONDS:-0} - start ))s"
                 return 0
             fi
             sz2=0; [[ -f "$out" ]] && sz2=$(wc -c < "$out" 2>/dev/null || echo 0)
-            echo "[WARN] attempt failed after $(( ${SECONDS:-0} - start ))s, received $((sz2 / 1024)) KB"
+            echo "WARN  attempt failed after $(( ${SECONDS:-0} - start ))s, received $((sz2 / 1024)) KB"
             sleep 2
         done
     elif command -v wget >/dev/null 2>&1; then
         for ((i = 1; i <= tries; i++)); do
-            echo "[RUN ] Downloading ($i/$tries): $url"
+            echo "RUN  Downloading ($i/$tries): $url"
             start=$SECONDS
             local wget_rate=()
             [[ -n "$DL_RATE_LIMIT" ]] && wget_rate=(--limit-rate="$DL_RATE_LIMIT")
@@ -104,31 +104,48 @@ dl() {  # dl <url> <output> <tries>  -> 0 success / 1 failure
             local wrc=$?
             if [[ $wrc -eq 0 && -s "$out" ]]; then
                 sz=$(wc -c < "$out" 2>/dev/null || echo 0)
-                echo "[ OK ] received $((sz / 1024)) KB in $(( ${SECONDS:-0} - start ))s"
+                echo "OK  received $((sz / 1024)) KB in $(( ${SECONDS:-0} - start ))s"
                 return 0
             fi
             sz=0; [[ -f "$out" ]] && sz=$(wc -c < "$out" 2>/dev/null || echo 0)
-            echo "[WARN] attempt failed after $(( ${SECONDS:-0} - start ))s, received $((sz / 1024)) KB"
+            echo "WARN  attempt failed after $(( ${SECONDS:-0} - start ))s, received $((sz / 1024)) KB"
             sleep 2
         done
     else
         local py_bin
         py_bin="$(command -v python3 || command -v python)"
         "$py_bin" - "$url" "$out" "$tries" <<'PY'
-import os, shutil, sys, time, urllib.request
+import os, re, sys, time, urllib.request
 url, out, tries = sys.argv[1], sys.argv[2], int(sys.argv[3])
+# honour DL_RATE_LIMIT like curl/wget do (chunked copy, sleep to pace)
+bps = None
+limit = os.environ.get("DL_RATE_LIMIT", "")
+m = re.fullmatch(r"(\d+)([kKmMgG]?)", limit.strip()) if limit else None
+if m:
+    mult = {"": 1, "k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}[m.group(2).lower()]
+    bps = int(m.group(1)) * mult
 for i in range(1, tries + 1):
     try:
-        print(f"[RUN ] Downloading ({i}/{tries}): {url}", flush=True)
+        print(f"RUN  Downloading ({i}/{tries}): {url}", flush=True)
         req = urllib.request.Request(url, headers={"User-Agent": "BioSpliceView-pipeline"})
+        t0, done = time.time(), 0
         with urllib.request.urlopen(req, timeout=30) as r, open(out, "wb") as f:
-            shutil.copyfileobj(r, f)
+            while True:
+                piece = r.read(65536)
+                if not piece:
+                    break
+                f.write(piece)
+                done += len(piece)
+                if bps:
+                    behind = done / bps - (time.time() - t0)
+                    if behind > 0:
+                        time.sleep(behind)
         if os.path.getsize(out) > 0:
-            print(f"[ OK ] received {os.path.getsize(out) // 1024} KB", flush=True)
+            print(f"OK  received {os.path.getsize(out) // 1024} KB", flush=True)
             sys.exit(0)
-        print("[WARN] empty file", file=sys.stderr)
+        print("WARN  empty file", file=sys.stderr)
     except Exception as e:
-        print(f"[WARN] failed: {e}", file=sys.stderr)
+        print(f"WARN  failed: {e}", file=sys.stderr)
     time.sleep(2)
 sys.exit(1)
 PY
@@ -138,13 +155,13 @@ PY
 }
 
 if dl "$PRIMARY" "$OUT" "$P_TRIES"; then
-    echo "[ OK ] Primary source OK: $PRIMARY"
+    echo "OK  Primary source OK: $PRIMARY"
     exit 0
 fi
-echo "[WARN] Primary source failed ${P_TRIES}x, switching to backup ..."
+echo "WARN  Primary source failed ${P_TRIES}x, switching to backup ..."
 if dl "$BACKUP" "$OUT" "$B_TRIES"; then
-    echo "[ OK ] Backup source OK: $BACKUP"
+    echo "OK  Backup source OK: $BACKUP"
     exit 0
 fi
-echo "[FAIL] Both primary and backup sources failed"
+echo "FAIL  Both primary and backup sources failed"
 exit 1

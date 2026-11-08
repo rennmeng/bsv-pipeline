@@ -29,19 +29,10 @@ import sys
 
 import pandas as pd
 
-# ---------------- terminal styles ----------------
-_TTY = sys.stdout.isatty() and not os.environ.get('NO_COLOR')
-
-
-def _c(code, s):
-    return f"\033[{code}m{s}\033[0m" if _TTY else str(s)
-
-
-def tag_ok(msg):   print(f"{_c('1;32', '[ OK ]')} {msg}")
-def tag_info(msg): print(f"{_c('1;36', 'INFO ')} {msg}")
-def tag_warn(msg): print(f"{_c('1;33', 'WARN ')} {msg}")
-def tag_fail(msg): print(f"{_c('1;31', '[FAIL]')} {msg}")
-def rule():        print(_c('2', '─' * 62))
+# shared terminal-style helpers: same tag standard as run_pipeline.sh
+# (see bsvterm.py for the format reference)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from bsvterm import _c, tag_ok, tag_info, tag_warn, tag_fail, rule
 
 
 def read_fasta(path):
@@ -230,11 +221,16 @@ def main():
             f.write(f">{header}\n{seq}\n")
     os.replace(tmp_fa, args.out_fasta)
 
-    # ---- 4. annotation TSV ----
-    if annot_rows:
-        tmp_ts = args.out_annotation + '.tmp'
-        pd.DataFrame(annot_rows).to_csv(tmp_ts, sep='\t', index=False)
-        os.replace(tmp_ts, args.out_annotation)
+    # ---- 4. annotation TSV (always written: the pipeline's Stage-3 resume
+    #         check requires the file to exist; a header-only TSV means no
+    #         event survived the filters) ----
+    annot_cols = ['Event_ID', 'geneSymbol', 'Splice_Type', 'NMD_Status',
+                  'Ref_Absolute_NMD', 'Alt_Absolute_NMD', 'Match_Status',
+                  'FDR', 'Ref_len_aa', 'Alt_len_aa', 'Ref_in_output',
+                  'Alt_in_output', 'Ref_header', 'Alt_header']
+    tmp_ts = args.out_annotation + '.tmp'
+    pd.DataFrame(annot_rows, columns=annot_cols).to_csv(tmp_ts, sep='\t', index=False)
+    os.replace(tmp_ts, args.out_annotation)
 
     # ---- 5. report ----
     total = len(uniprot_entries) + len(sv_entries)
@@ -260,8 +256,7 @@ def main():
                      f"UniProt {len(uniprot_entries)} + splice {len(sv_entries)}"))
     rule()
     tag_ok(f"FASTA        {args.out_fasta}")
-    if annot_rows:
-        tag_ok(f"annotation   {args.out_annotation}")
+    tag_ok(f"annotation   {args.out_annotation}")
 
 
 if __name__ == '__main__':

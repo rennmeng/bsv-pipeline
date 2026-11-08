@@ -15,7 +15,10 @@ applied to the Protein.Ids column (DIA-NN run with --ids-to-names):
 Statistics are exploratory: nominal two-sided Welch t-tests (values missing
 in either group are excluded pairwise); a single-group detection (all
 replicates of one group, none of the other) is flagged with a placeholder
-p-value (1e-10) and +/-inf log2FC.
+p-value (1e-10) and +/-inf log2FC. The log2FC column is
+log2(group2/group1) - positive means higher abundance in group 2 - and a
+Benjamini-Hochberg adjusted column (p_adj_BH) is provided for reference
+while candidate selection keeps the nominal p-value cutoff.
 
 Usage:
   python summarize_splice_peptides.py --pr-matrix report.pr_matrix.tsv \
@@ -33,21 +36,13 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-PLACEHOLDER_P = 1e-10  # group-restricted detection (3 vs 0)
+PLACEHOLDER_P = 1e-10  # group-restricted detection (all replicates of one
+                       # group, none of the other)
 
-# ---------------- terminal styles ----------------
-_TTY = sys.stdout.isatty() and not os.environ.get('NO_COLOR')
-
-
-def _c(code, s):
-    return f"\033[{code}m{s}\033[0m" if _TTY else str(s)
-
-
-def tag_ok(msg):   print(f"{_c('1;32', '[ OK ]')} {msg}")
-def tag_info(msg): print(f"{_c('1;36', 'INFO ')} {msg}")
-def tag_warn(msg): print(f"{_c('1;33', 'WARN ')} {msg}")
-def tag_fail(msg): print(f"{_c('1;31', '[FAIL]')} {msg}")
-def rule():        print(_c('2', '─' * 62))
+# shared terminal-style helpers: same tag standard as run_pipeline.sh
+# (see bsvterm.py for the format reference)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from bsvterm import _c, tag_ok, tag_info, tag_warn, tag_fail, rule
 
 
 def keep_row(val):
@@ -93,6 +88,23 @@ def regulation(log2fc):
     return "Up" if log2fc >= 0 else "Down"
 
 
+def bh_adjust(pvals):
+    """Benjamini-Hochberg adjusted p-values (NaN-preserving)."""
+    p = np.asarray(pvals, dtype=float)
+    out = np.full(p.shape, np.nan)
+    mask = ~np.isnan(p)
+    if mask.any():
+        pm = p[mask]
+        order = np.argsort(pm, kind="mergesort")
+        ranked = pm[order]
+        n = ranked.size
+        adj = np.minimum.accumulate((ranked * n / np.arange(1, n + 1))[::-1])[::-1]
+        unsorted = np.empty(n)
+        unsorted[order] = np.minimum(adj, 1.0)
+        out[mask] = unsorted
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -117,13 +129,23 @@ def main():
     df = pd.read_csv(args.pr_matrix, sep="\t")
     tag_info(f"Raw table: {df.shape[0]} rows x {df.shape[1]} columns")
 
-    # column resolution: pr_matrix columns may be file names or full paths;
-    # exact match first, then substring match
+    # column resolution: pr_matrix columns may be file names or full paths.
+    # exact match first; then a separator-boundary match on the file-name
+    # part (so "WT-1.d" cannot hit "WT-10.d"); raw substring as last resort
     def resolve_col(name):
         cols = list(df.columns)
         if name in cols:
             return name
-        hits = [c for c in cols if name in c]
+        sep_hits = [c for c in cols
+                    if str(c).endswith(("/" + name, "\\" + name))
+                    or os.path.basename(str(c)) == name]
+        if len(sep_hits) == 1:
+            tag_info(f"Column '{name}' resolved to '{sep_hits[0]}'")
+            return sep_hits[0]
+        if len(sep_hits) > 1:
+            tag_warn(f"Column '{name}' has {len(sep_hits)} candidates, using the first: {sep_hits[0]}")
+            return sep_hits[0]
+        hits = [c for c in cols if name in str(c)]
         if len(hits) == 1:
             tag_info(f"Column '{name}' resolved to '{hits[0]}'")
             return hits[0]
@@ -202,14 +224,16 @@ def main():
             p_values.append(p_val)
             patterns.append(pattern)
 
+            # the column is labelled log2FC(group2/group1): positive means
+            # higher abundance in group 2
             if (not np.isnan(g1_mean) and not np.isnan(g2_mean)
                     and g1_mean > 0 and g2_mean > 0):
-                fc_values.append(np.log2(g1_mean / g2_mean))
+                fc_values.append(np.log2(g2_mean / g1_mean))
             else:
                 if n_g1 == n1_full and n_g2 == 0:
-                    fc_values.append(np.inf)
+                    fc_values.append(-np.inf)   # only group 1 detected
                 elif n_g1 == 0 and n_g2 == n2_full:
-                    fc_values.append(-np.inf)
+                    fc_values.append(np.inf)    # only group 2 detected
                 else:
                     fc_values.append(np.nan)
 
@@ -220,6 +244,7 @@ def main():
         out[f"{args.group2_name}_mean"] = g2_means
         out[f"log2FC({args.group2_name}/{args.group1_name})"] = fc_values
         out["p_value"] = p_values
+        out["p_adj_BH"] = bh_adjust(p_values)
         out["Detection_Pattern"] = patterns
         return out
 

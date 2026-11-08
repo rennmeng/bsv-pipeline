@@ -43,17 +43,25 @@ fi
 # ------------------------------------------------------------
 # Output language: boxes, tags, notes
 # ------------------------------------------------------------
-# Glyph set: braille dot spinner everywhere; block bar / middot only in
-# Windows Terminal (WT_SESSION) or UNICODE_FANCY=1; NO_UNICODE=1 pure ASCII.
+# Glyph set: braille dot spinner everywhere; box-drawing rules and arrows
+# everywhere (ASCII fallback via NO_UNICODE=1); block bar / middot only in
+# Windows Terminal (WT_SESSION) or UNICODE_FANCY=1.
+# Output standard (shared by the Python helpers via scripts/bsvterm.py):
+#   <tag>  message     tags are exactly 4 chars + two spaces:
+#                      OK / RUN / SKIP / HAVE / INFO / WARN / FAIL
+#   note lines are 6-space indented (aligned with the message column)
 UI_H='─'
-UI_BAR_F='#'; UI_BAR_E='.'; UI_SEP='|'; UI_ARROW='→'; UI_ELL='...'
+UI_TL='┌'; UI_TR='┐'; UI_BL='└'; UI_BR='┘'; UI_VV='│'
+UI_BAR_F='#'; UI_BAR_E='.'; UI_SEP='|'; UI_ARROW='→'
 UI_SPIN=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)   # standard braille dot spinner, white, at line head
 if [[ -n "${WT_SESSION:-}" || "${UNICODE_FANCY:-0}" == 1 ]]; then
     UI_BAR_F='█'; UI_BAR_E='░'; UI_SEP='·'
 fi
 if [[ "${NO_UNICODE:-0}" == 1 ]]; then
-    UI_H='-'; UI_BAR_F='#'; UI_BAR_E='.'; UI_SEP='-'
-    UI_ARROW='->'; UI_ELL='...'
+    UI_H='-'
+    UI_TL='+'; UI_TR='+'; UI_BL='+'; UI_BR='+'; UI_VV='|'
+    UI_BAR_F='#'; UI_BAR_E='.'; UI_SEP='-'
+    UI_ARROW='->'
     UI_SPIN=( '-' '\' '|' '/' )   # pure-ASCII fallback
 fi
 
@@ -73,20 +81,36 @@ headline() {  # headline <content>
     echo -e "${DIM}── ${R}${content} ${DIM}${rule}${R}"
 }
 
+# ui_box <content-with-colors>: single-line box, total width BOXW+2 so it
+# aligns with headline() rules. Used for stage banners and the completion
+# header; ASCII fallback via UI_TL/UI_TR/UI_BL/UI_BR/UI_VV.
+ui_box() {  # ui_box <content>
+    local content="$1" vis pad rule sp
+    vis=$(vislen "$content")
+    pad=$(( BOXW - 2 - vis )); (( pad < 1 )) && pad=1
+    rule=$(printf -- "${UI_H}%.0s" $(seq 1 $BOXW))
+    sp="$(printf -- ' %.0s' $(seq 1 $pad))"
+    echo -e "${DIM}${UI_TL}${rule}${UI_TR}${R}"
+    echo -e "${DIM}${UI_VV}${R} ${content}${sp} ${DIM}${UI_VV}${R}"
+    echo -e "${DIM}${UI_BL}${rule}${UI_BR}${R}"
+}
+
 banner() {  # banner <n/total | label> <title> [subtitle] [timeline-label]
     local n="${1%%/*}" total="${1##*/}"
     local title="$2" sub="${3:-}" lbl="${4:-}" bar="" filled empty seg i head
     if [[ "$n" =~ ^[0-9]+$ && "$total" =~ ^[0-9]+$ ]]; then
-        head="${B}${CYAN}STAGE $n/$total${R} ${DIM}─${R} ${B}${WHITE}$title${R}"
+        head="${B}${CYAN}STAGE ${n}/${total}${R} ${DIM}${UI_SEP}${R} ${B}${WHITE}${title}${R}"
+        STAGE_NO=$n; STAGE_OF=$total   # globals: the status line's overall bar
         filled=$(( (n - 1) * 24 / total )); (( filled < 0 )) && filled=0
         empty=$(( 24 - filled )); seg=""
         for ((i = 0; i < filled; i++)); do seg+="$UI_BAR_F"; done
         bar="[${CYAN}${seg}${R}${DIM}$(printf -- "${UI_BAR_E}%.0s" $(seq 1 $empty))${R}]  progress ${B}${CYAN}${n}/${total}${R}"
     else
-        head="${B}${WHITE}$title${R}"
+        head="${B}${WHITE}${title}${R}"
+        STAGE_NO=""; STAGE_OF=""
     fi
     echo ""
-    headline "$head"
+    ui_box "$head"
     [[ -n "$sub" ]] && echo -e "  ${DIM}$sub${R}"
     [[ -n "$bar" ]] && echo -e "  $bar"
     STAGE_CUR="${lbl:-$1}"
@@ -119,6 +143,13 @@ fmt_secs() {  # seconds -> "1h 03m 12s" / "42s"
     h=$(( t / 3600 )); m=$(( (t % 3600) / 60 )); s=$(( t % 60 ))
     if (( h > 0 )); then echo "${h}h $(printf '%02d' $m)m $(printf '%02d' $s)s"
     else echo "${m}m $(printf '%02d' $s)s"; fi
+}
+fmt_secs_c() {  # compact, for the status-line width budget: "1h03m" / "3m21s" / "42s"
+    local t="$1" h m s
+    if (( t < 60 )); then echo "${t}s"; return; fi
+    h=$(( t / 3600 )); m=$(( (t % 3600) / 60 )); s=$(( t % 60 ))
+    if (( h > 0 )); then echo "${h}h$(printf '%02d' $m)m"
+    else echo "${m}m$(printf '%02d' $s)s"; fi
 }
 fmt_bytes() {  # bytes -> "813 B" / "12 kB" / "4.2 MB" / "1.8 GB"
     awk -v b="${1:-0}" 'BEGIN {
@@ -203,24 +234,22 @@ run_streamed() {  # run_streamed <log-file> <cmd> [args...]
     local main_pid
     main_pid="$$"
     # live milestone stream: tail the log through the stage filter
-    local last_file="$log.last"
-    rm -f "$last_file"   # a stale milestone from a previous run would mislead the "last:" field
     ( tail -f -n +1 --pid="$pid" "$log" 2>/dev/null \
         | grep --line-buffered -iE "$filter" \
         | while IFS= read -r l; do
               [[ -n "$l" ]] || continue
               tty_clear_line "$tty_dev"   # keep the milestone clear of the bar
               note "$l"
-              printf '%s' "$l" > "$last_file"
           done ) &
     local mon=$!
     # liveness heartbeat -> ONE in-place status line on the terminal:
-    # ⠸ [████████████░░░░░░░░] 60% 3/5 samples · 12m 03s · CPU 6.4/8 cores · 14G
-    # The spinner animates continuously (~10 fps) so liveness is visible at
-    # a glance; the stats refresh once per beat (STREAM_HEARTBEAT). A real
-    # bar needs a countable total (STREAM_TOTAL + STREAM_COUNT_CMD at the
-    # call site); otherwise spinner + elapsed / tree CPU / watched dir /
-    # last milestone. No fake percentages without a denominator. Without a
+    # ⠸ [████░░░░] 2/5 · [██████████░░░░░░] 50% 3/6 analysis · total 1h03m · stage 4m12s · CPU 6.4/32
+    # TWO color-coded bars: CYAN = the whole run (same hue as the banner's
+    # stage bar), GREEN = the current sub-step; both clocks re-render every
+    # frame so the seconds tick live. The spinner animates continuously
+    # (~10 fps); the stats refresh once per beat (STREAM_HEARTBEAT). A real
+    # step bar needs a countable total (STREAM_TOTAL + STREAM_COUNT_CMD at
+    # the call site). No fake percentages without a denominator. Without a
     # tty the heartbeat falls back to one plain line per beat.
     if (( hb > 0 )); then
         ( TTY="$tty_dev"
@@ -241,34 +270,34 @@ run_streamed() {  # run_streamed <log-file> <cmd> [args...]
               if [[ "$NCPU" =~ ^[0-9]+$ && "$NCPU" -gt 0 ]]; then
                   cpu_txt="CPU $(awk -v c="$cpu" -v n="$NCPU" 'BEGIN{printf "%.1f/%d", c/100, n}') cores"
               fi
-              local out=""
+              local osz=""
               if [[ -n "${STREAM_WATCH_DIR:-}" ]]; then
-                  local osz; osz="$(du -sh "$STREAM_WATCH_DIR" 2>/dev/null | cut -f1)"
-                  [[ -n "$osz" ]] && out=" ${UI_SEP} $osz"
-              fi
-              local ms="-"
-              if [[ -f "$last_file" ]]; then
-                  # strip log prefixes (timestamps/levels) and STAR's
-                  # leading dot separators - they eat the width budget
-                  # without adding information
-                  ms="$(tail -n 1 "$last_file" 2>/dev/null | sed -E $'s/^[0-9]{2}:[0-9]{2}:[0-9]{2}[ \t]+[A-Z]+[ \t]+//; s/^[A-Z][a-z]{2}[ \t]+[ 0-9][0-9][ \t]+[0-9]{2}:[0-9]{2}:[0-9]{2}[ \t]+//; s/^[.]+[ \t]*//')"
-                  [[ -n "$ms" ]] || ms="-"
+                  osz="$(du -sh "$STREAM_WATCH_DIR" 2>/dev/null | cut -f1)"
               fi
               local prog=""
               if [[ "${STREAM_TOTAL:-0}" =~ ^[0-9]+$ && "${STREAM_TOTAL:-0}" -gt 0 && -n "${STREAM_COUNT_CMD:-}" ]]; then
-                  local d; d="$( { eval "$STREAM_COUNT_CMD"; } 2>/dev/null )"
+                  # COUNT_CMD emits "<count>" or "<count>:<unit-label>" - the
+                  # optional label lets one call site switch between phases
+                  # (DIA-NN pre-processing -> analysis) instead of merging
+                  # them into one shared counter
+                  local d_raw d unit_lbl
+                  d_raw="$( { eval "$STREAM_COUNT_CMD"; } 2>/dev/null | head -n1 )"
+                  d="${d_raw%%:*}"
+                  unit_lbl="${d_raw#*:}"
+                  [[ "$unit_lbl" == "$d_raw" ]] && unit_lbl=""
                   [[ "$d" =~ ^[0-9]+$ ]] || d=0
                   (( d > STREAM_TOTAL )) && d="$STREAM_TOTAL"
                   # NB: never compute a local from another local declared in
                   # the SAME local statement - expansion may run before the
                   # earlier assignment lands (observed on bash 5.3 subshells)
-                  local cells=20 f=0 i seg=""
+                  local cells=14 f=0 i seg=""
                   f=$(( d * cells / STREAM_TOTAL ))
                   for ((i = 0; i < f;    i++)); do seg+="$UI_BAR_F"; done
                   for ((i = f; i < cells; i++)); do seg+="$UI_BAR_E"; done
-                  # step-level bar is GREEN: distinct from the CYAN overall
-                  # stage-progress bar in the banner
-                  prog=" [${GREEN}${seg}${R}] ${B}${WHITE}$(( d * 100 / STREAM_TOTAL ))%${R} ${d}/${STREAM_TOTAL} ${STREAM_UNIT:-steps}"
+                  # GREEN sub-step bar: color-coded against the CYAN whole-run
+                  # bar; the phase label rides after the count so the current
+                  # phase is always visible
+                  prog="[${GREEN}${seg}${R}] ${B}${WHITE}$(( d * 100 / STREAM_TOTAL ))%${R} ${d}/${STREAM_TOTAL} ${unit_lbl:-${STREAM_UNIT:-steps}}"
                   # the counter may hit its ceiling while the tool is still
                   # working (rMATS maps all samples, then quantifies) - say so
                   # instead of letting a full bar spin like a hang
@@ -280,41 +309,64 @@ run_streamed() {  # run_streamed <log-file> <cmd> [args...]
               # columns than they render) and a wrapped status line cannot
               # be redrawn in place - every refresh scrolls instead.
               # STATUS_COLS=<n> (env or config) forces a smaller ceiling.
-              # The elapsed time is assumed at its widest (10 chars, "1h
-              # 03m 12s") and is re-rendered EVERY animation frame, so the
-              # seconds tick live between stats refreshes.
-              local rest_txt tail_rest budget maxline live vis
+              local maxline live sc
               maxline=$(( BOXW + 2 ))
               live="$( { stty size < /dev/tty; } 2>/dev/null | cut -d' ' -f2 )"
               if [[ "$live" =~ ^[0-9]+$ && "$live" -ge 20 ]] && (( live < maxline )); then
                   maxline=$live
               fi
-              local sc="${STATUS_COLS:-${status_cols:-}}"
+              sc="${STATUS_COLS:-${status_cols:-}}"
               if [[ "$sc" =~ ^[0-9]+$ ]] && (( sc < maxline )); then
                   maxline=$sc
               fi
-              local sep1=" ${UI_SEP} "
-              [[ -z "$prog" ]] && sep1=""   # spinner-only mode: no leading separator
-              rest_txt="${cpu_txt}${out}"
-              vis=$(( 2 + $(vislen "$prog") + 3 + 10 + 3 + ${#rest_txt} + 9 ))   # +2 = trailing space + spinner
-              if (( vis > maxline )); then
-                  out=""
-                  rest_txt="${cpu_txt}"
-                  prog="${prog/" ${DIM}(wrapping up)${R}"/}"
-                  vis=$(( 2 + $(vislen "$prog") + 3 + 10 + 3 + ${#rest_txt} + 9 ))   # +2 = trailing space + spinner
+              # whole-run bar: CYAN, same hue as the banner's stage bar;
+              # position = STAGE_NO/STAGE_OF (set by banner). On this line the
+              # two bars are color-coded: cyan = whole run, green = sub-step
+              local tbar=""
+              if [[ "${STAGE_NO:-}" =~ ^[0-9]+$ && "${STAGE_OF:-}" =~ ^[0-9]+$ && "$STAGE_OF" -gt 0 ]] 2>/dev/null; then
+                  local tc=8 tf=0 tseg="" te_seg="" ti
+                  tf=$(( STAGE_NO * tc / STAGE_OF )); (( tf > tc )) && tf=tc; (( tf < 0 )) && tf=0
+                  for ((ti = 0; ti < tf; ti++)); do tseg+="$UI_BAR_F"; done
+                  for ((ti = tf; ti < tc; ti++)); do te_seg+="$UI_BAR_E"; done
+                  tbar="[${CYAN}${tseg}${R}${DIM}${te_seg}${R}] ${B}${CYAN}${STAGE_NO}/${STAGE_OF}${R}"
               fi
-              budget=$(( maxline - vis ))
-              if (( budget >= 8 )); then
-                  [[ "$ms" == "-" ]] || ms="${ms:0:budget}"
-                  tail_rest=" ${UI_SEP} last: ${ms}"
-              else
-                  tail_rest=""
-              fi
+              # width plan with WORST-CASE clocks ("59m59s" = 6 cols each, the
+              # real ones are re-rendered every animation frame); degrade by
+              # dropping: watched dir -> CPU -> stage clock. The two bars and
+              # the total clock always stay.
+              local SEP_C=" ${DIM}${UI_SEP}${R} "
+              local drop=0 line vis
+              while :; do
+                  line=""
+                  [[ -n "$tbar" ]] && line+="$tbar"
+                  if [[ -n "$prog" ]]; then
+                      [[ -n "$line" ]] && line+="$SEP_C"
+                      line+="$prog"
+                  fi
+                  [[ -n "$line" ]] && line+="$SEP_C"
+                  line+="total ${B}1h03m${R}"
+                  if (( drop < 3 )); then
+                      line+="$SEP_C"
+                      line+="stage ${B}59m59s${R}"
+                  fi
+                  if (( drop < 2 )); then
+                      line+="$SEP_C"
+                      line+="${cpu_txt}"
+                  fi
+                  if (( drop < 1 )) && [[ -n "$osz" ]]; then
+                      line+="$SEP_C"
+                      line+="${osz}"
+                  fi
+                  vis=$(( 2 + $(vislen "$line") ))   # +2 = leading space + spinner
+                  if (( vis <= maxline || drop >= 3 )); then break; fi
+                  drop=$(( drop + 1 ))
+              done
               if [[ -n "$TTY" ]]; then
-                  # animate the spinner AND the elapsed seconds between stats
-                  # refreshes (cpu/counter/last stay per-refresh); NB: declare
-                  # THEN assign - see the local-expansion note above
-                  local steps t el_txt
+                  # animate the spinner AND both clocks between stats
+                  # refreshes (bars/cpu stay per-beat); NB: the spinner goes
+                  # through %s (a '\' frame through %b would fuse with the
+                  # next code and print "033[0m"), the rest rides through %b
+                  local steps t t_el s_el
                   steps=$anim_secs
                   [[ "$SPIN_DELAY" == 0.1 ]] && steps=$(( anim_secs * 10 ))
                   for ((t = 0; t < steps; t++)); do
@@ -323,19 +375,57 @@ run_streamed() {  # run_streamed <log-file> <cmd> [args...]
                       # reason, stop drawing within one frame ($$ and PPID
                       # are useless in a subshell - see MAIN_PID above)
                       kill -0 "$MAIN_PID" 2>/dev/null || exit
-                      el_txt="$(fmt_secs $(( ${SECONDS:-0} - STAGE_T0 )))"
-                      # spinner via %s (a '\' frame through %b would fuse
-                      # with the next code and print "033[0m"); elapsed via
-                      # %s too - the surrounding escape codes ride with %b
-printf '\r\033[K%b%s%b%s%b%s%b' "${WB}" "${SPIN[SI]}" "${R}${prog}${DIM} ${UI_SEP} ${B}" "${el_txt}" "${R}${DIM} ${UI_SEP} ${rest_txt}${tail_rest}${R}" > "$TTY" 2>/dev/null
+                      t_el="$(fmt_secs_c $(( ${SECONDS:-0} - T0 )))"
+                      s_el="$(fmt_secs_c $(( ${SECONDS:-0} - STAGE_T0 )))"
+                      line=""
+                      [[ -n "$tbar" ]] && line+="$tbar"
+                      if [[ -n "$prog" ]]; then
+                          [[ -n "$line" ]] && line+="$SEP_C"
+                          line+="$prog"
+                      fi
+                      [[ -n "$line" ]] && line+="$SEP_C"
+                      line+="total ${B}${t_el}${R}"
+                      if (( drop < 3 )); then
+                          line+="$SEP_C"
+                          line+="stage ${B}${s_el}${R}"
+                      fi
+                      if (( drop < 2 )); then
+                          line+="$SEP_C"
+                          line+="${cpu_txt}"
+                      fi
+                      if (( drop < 1 )) && [[ -n "$osz" ]]; then
+                          line+="$SEP_C"
+                          line+="${osz}"
+                      fi
+printf '\r\033[K%b%s%b' "${WB}" "${SPIN[SI]}" " ${line}${R}" > "$TTY" 2>/dev/null
                       SI=$(( (SI + 1) % ${#SPIN[@]} ))
                       sleep "$SPIN_DELAY"
                   done
               else
-                  local el_txt
-                  el_txt="$(fmt_secs $(( ${SECONDS:-0} - STAGE_T0 )))"
+                  t_el="$(fmt_secs_c $(( ${SECONDS:-0} - T0 )))"
+                  s_el="$(fmt_secs_c $(( ${SECONDS:-0} - STAGE_T0 )))"
+                  line=""
+                  [[ -n "$tbar" ]] && line+="$tbar"
+                  if [[ -n "$prog" ]]; then
+                      [[ -n "$line" ]] && line+="$SEP_C"
+                      line+="$prog"
+                  fi
+                  [[ -n "$line" ]] && line+="$SEP_C"
+                  line+="total ${B}${t_el}${R}"
+                  if (( drop < 3 )); then
+                      line+="$SEP_C"
+                      line+="stage ${B}${s_el}${R}"
+                  fi
+                  if (( drop < 2 )); then
+                      line+="$SEP_C"
+                      line+="${cpu_txt}"
+                  fi
+                  if (( drop < 1 )) && [[ -n "$osz" ]]; then
+                      line+="$SEP_C"
+                      line+="${osz}"
+                  fi
                   local sz=0; [[ -f "$log" ]] && sz=$(wc -c < "$log" 2>/dev/null || echo 0)
-                  echo -e "${WB}${SPIN[SI]}${R} still working${prog}${sep1}${B}${el_txt}${R}${DIM} ${UI_SEP} ${rest_txt} ${UI_SEP} log $(fmt_bytes "$sz")${tail_rest} ${CYAN}${SPIN[SI]}${R}"
+                  echo -e "${WB}${SPIN[SI]}${R} still working ${line} ${DIM}${UI_SEP} log $(fmt_bytes "$sz")${R} ${CYAN}${SPIN[SI]}${R}"
                   SI=$(( (SI + 1) % ${#SPIN[@]} ))
                   sleep "$hb"
               fi
@@ -379,22 +469,30 @@ kill_tree() {  # kill_tree <pid>: kill a process and all its descendants
 # the tool, the log monitor and the status-line animator would survive as
 # orphans and keep drawing to the terminal ("cannot terminate").
 on_signal() {
-    trap '' INT TERM   # mash-proof: further Ctrl-C cannot abort the teardown
+    trap '' INT TERM HUP   # mash-proof: further Ctrl-C cannot abort the teardown
     tty_clear_line "${STREAM_TTY_DEV:-}" 2>/dev/null || true
     echo "" >&2
     echo -e "${RED}[FAIL]${R} interrupted - rerun the same command to resume (completed stages are reused)" >&2
     local kid
     for kid in $(child_pids "$$"); do kill_tree "$kid"; done
-    # final sweep: the whole tree shares this process group, so this
-    # reaches anything the enumeration missed; it also TERM's this shell
-    # (traps are ignored now) - the teardown is done either way
-    kill -TERM -- "-$$" 2>/dev/null || true
+    # final sweep: when this shell LEADS its own process group (an
+    # interactive shell gives each job its own), a group-wide signal
+    # reaches anything the enumeration missed. When it merely shares the
+    # caller's group (nested scripts), a group kill would also TERM the
+    # caller - skip it and rely on the per-process sweep above.
+    local pgid=""
+    pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ')" || pgid=""
+    if [[ "$pgid" == "$$" ]]; then
+        kill -TERM -- "-$$" 2>/dev/null || true
+    fi
     sleep 0.3          # grace for TERM, then KILL whatever is left
     for kid in $(child_pids "$$"); do kill -9 "$kid" 2>/dev/null || true; done
-    kill -KILL -- "-$$" 2>/dev/null || true
+    if [[ "$pgid" == "$$" ]]; then
+        kill -KILL -- "-$$" 2>/dev/null || true
+    fi
     exit 130
 }
-trap on_signal INT TERM
+trap on_signal INT TERM HUP   # HUP: terminal window closed / SSH dropped
 
 conda_env_bin() {
     local base="" env_name="${CONDA_ENV_NAME:-bsv-pipeline}"
@@ -429,10 +527,122 @@ find_tool() {  # find_tool <binary-name>: prints the path, or returns 1
     return 1
 }
 
-# ------------------------------------------------------------
-# rMATS samples: explicit lists win; otherwise prefix auto-discovery
-# in fastq_dir (paired: R1/R2 mate pairing by common naming patterns)
-# ------------------------------------------------------------
+# provision_dotnet: resolve, install and expose the .NET runtime
+# (DIA-NN reads Thermo .raw files through it). Resolution: already on
+# PATH / in the conda env -> install into the env (same home as the
+# other tools) -> fall back to the per-work cache. Idempotent.
+dotnet_serves() {  # dotnet_serves <dotnet-path> <major>: true when the
+    local rts v    # binary serves that major runtime (e.g. 8)
+    [[ -x "$1" && -n "${2:-}" ]] || return 1
+    # capture first, then grep: under pipefail, `cmd | grep -q` can see a
+    # SIGPIPE (141) from the producer even when the wanted line was matched
+    rts="$("$1" --list-runtimes 2>/dev/null || true)"
+    printf '%s' "$rts" | grep -qE "Microsoft\.NETCore\.App ${2}\." || return 1
+    # DIA-NN 2.6.1 refuses to read .raw without .NET Runtime 8 >= 8.0.17
+    # ("please download and install .NET Runtime 8: 8.0.17 or later").
+    # --list-runtimes lists versions ascending: take the LAST 8.x match,
+    # so a side-by-side upgrade (old 8.0.11 + new 8.0.2x) is judged by the
+    # newest one, not the oldest.
+    if [[ "$2" == "8" ]]; then
+        v="$(printf '%s\n' "$rts" | awk '/Microsoft\.NETCore\.App 8\./{v=$2} END{print v}')"
+        [[ -n "$v" ]] || return 1
+        [[ "$(printf '%s\n%s\n' "8.0.17" "$v" | sort -V | head -n1)" == "8.0.17" ]]
+    else
+        return 0
+    fi
+}
+
+dotnet_root_of() {  # dotnet_root_of <dotnet-binary>: print the DIRECTORY
+    local rp root   # hosting its runtime (host/fxr under it); else failure.
+                    # DOTNET_ROOT must point there, never at the binary
+                    # itself - DIA-NN dlopens hostfxr from it and a file
+                    # path (or an unset variable, leaving DIA-NN to whatever
+                    # system hostfxr it finds) yields "hostfxr init failed:
+                    # 0x80008096".
+    rp="$(readlink -f "$1" 2>/dev/null || realpath "$1" 2>/dev/null || echo "$1")"
+    root="$(dirname "$rp")"
+    [[ -d "$root/host/fxr" ]] && { echo "$root"; return 0; }
+    if [[ -d "$root/lib/dotnet/host/fxr" ]]; then   # conda-forge layout
+        echo "$root/lib/dotnet"; return 0
+    fi
+    return 1
+}
+
+dotnet_wanted_major() {  # dotnet_wanted_major <diann-bin>: the major .NET
+    local cfg="" maj=""  # version DIA-NN's RawWrapper asks for; 8 when unknown
+    if [[ -n "${1:-}" ]]; then cfg="$(dirname "$1")/RawWrapper.runtimeconfig.json"; fi
+    if [[ -n "$cfg" && -f "$cfg" ]]; then
+        maj="$(grep -o '"version"[[:space:]]*:[[:space:]]*"[0-9]\+' "$cfg" 2>/dev/null \
+            | head -n1 | grep -o '[0-9]\+$')"
+        if [[ -z "$maj" ]]; then
+            maj="$(grep -o '"tfm"[[:space:]]*:[[:space:]]*"net[0-9]\+' "$cfg" 2>/dev/null \
+                | head -n1 | grep -o '[0-9]\+$')"
+        fi
+    fi
+    echo "${maj:-8}"
+}
+
+# provision_dotnet [force]: guarantee the .NET runtime DIA-NN needs to read
+# Thermo .raw files. Every success path exports DOTNET_ROOT as the
+# DIRECTORY that hosts the runtime. A dotnet on PATH/env lacking the
+# wanted major (e.g. an old distro build) is NOT accepted - the pinned
+# runtime is installed instead. force=1 skips every acceptance check and
+# installs a clean runtime into <work_dir>/ref/dotnet (the Stage-4 retry
+# path after DIA-NN reports the current one unusable).
+provision_dotnet() {
+    local force="${1:-}" dest="" env_root="" want pt=""
+    want="$(dotnet_wanted_major "${diann_bin:-}")"
+    if [[ "$force" != "force" ]]; then
+        # managed env first (bin symlink -> env root), then PATH / active env
+        pt="$(find_tool dotnet || true)"
+        if [[ -z "$pt" ]] && ENV_BIN="$(conda_env_bin)" && [[ -x "${ENV_BIN%/bin}/dotnet" ]]; then
+            pt="${ENV_BIN%/bin}/dotnet"
+        fi
+        if [[ -n "$pt" ]] && dotnet_serves "$pt" "$want"; then
+            dest="$(dotnet_root_of "$pt" || true)"
+        fi
+        if [[ -z "$dest" ]] && [[ -x "$work_dir/ref/dotnet/dotnet" ]] \
+            && dotnet_serves "$work_dir/ref/dotnet/dotnet" "$want"; then
+            dest="$(dotnet_root_of "$work_dir/ref/dotnet/dotnet" || true)"
+            [[ -n "$dest" ]] || dest="$work_dir/ref/dotnet"
+        fi
+    fi
+    if [[ -z "$dest" ]]; then
+        if [[ "$force" == "force" ]]; then
+            run_ "Installing a clean pinned .NET $want runtime (DIA-NN reported the current one unusable)"
+        else
+            run_ ".NET $want runtime not available - provisioning it now (DIA-NN needs it to read Thermo .raw files)"
+        fi
+        dest="$work_dir/ref/dotnet"
+        if [[ "$force" != "force" ]] && ENV_BIN="$(conda_env_bin)"; then
+            env_root="${ENV_BIN%/bin}"
+            if { mkdir -p "$env_root" 2>/dev/null && touch "$env_root/.w" 2>/dev/null && rm -f "$env_root/.w"; } 2>/dev/null; then
+                dest="$env_root"
+            fi
+        fi
+        mkdir -p "$dest"
+        bash "$SCRIPT_DIR/scripts/install_dotnet.sh" "$dest" "$want" \
+            || die ".NET $want runtime installation failed (or install dotnet-runtime-$want.0 system-wide with apt)"
+        if [[ "$dest" != "$work_dir/ref/dotnet" ]] && ENV_BIN="$(conda_env_bin)" && [[ -d "$ENV_BIN" ]]; then
+            ln -sf "$dest/dotnet" "$ENV_BIN/dotnet" 2>/dev/null || true
+        fi
+    fi
+    export DOTNET_ROOT="$dest"   # DIA-NN resolves hostfxr from this directory
+    # Bake it into the managed env so MANUAL `conda run -n <env> diann-linux`
+    # invocations resolve the runtime too. Without this, a hand-launched
+    # DIA-NN has no DOTNET_ROOT, falls back to system default locations and
+    # dies with "cannot read .raw files, please download and install .NET
+    # Runtime 8". Takes effect on the NEXT activation; the pipeline run
+    # itself already carries the exported value above. Best-effort: skipped
+    # for micromamba/no-conda setups.
+    if command -v conda >/dev/null 2>&1; then
+        conda env config vars set -n "${CONDA_ENV_NAME:-bsv-pipeline}" \
+            "DOTNET_ROOT=$dest" >/dev/null 2>&1 \
+            && note "DOTNET_ROOT baked into the '${CONDA_ENV_NAME:-bsv-pipeline}' env (manual DIA-NN runs now work after the next activation)" \
+            || true
+    fi
+    have ".NET $want runtime ready ($dest)"
+}
 resolve_group() {  # resolve_group <group-name> <current-list>; result stdout, progress stderr
     local name="$1" val="$2"
     if [[ -n "$val" ]]; then
@@ -485,23 +695,13 @@ resolve_group() {  # resolve_group <group-name> <current-list>; result stdout, p
     echo "$list"
 }
 
-# ------------------------------------------------------------
-# MS raw files: explicit lists win; otherwise prefix discovery in
-# ms_dir (Bruker .d directory / Thermo .raw file, case-insensitive)
-# ------------------------------------------------------------
-
-# ------------------------------------------------------------
-# DIA-NN — prepared in parallel with the transcriptome stages:
-#   start_diann_background : fire-and-forget (called at the Stage 1 entry)
-#   wait_diann             : collect before the DIA-NN search (Stage 4)
-# Resolution: config diann_bin -> image bundle -> ref/ cache -> download
-# ------------------------------------------------------------
 diann_complete() {  # diann_complete <bin>: binary + its models/dict.txt
     [[ -x "$1" && -f "$(dirname "$1")/models/dict.txt" ]]
 }
 
 start_diann_background() {
     DIANN_BG_PID=""
+    diann_bin="${diann_bin:-}"                 # may be unset in the config: set -u guard
     diann_version="${diann_version:-2.6.1}"
     export DIANN_VERSION="$diann_version"      # consumed by scripts/install_diann.sh
     if [[ -n "$diann_bin" && ! -x "$diann_bin" ]]; then
@@ -509,12 +709,20 @@ start_diann_background() {
         diann_bin=""
     fi
     if [[ -n "$diann_bin" ]] && ! diann_complete "$diann_bin"; then
-        warn "Configured diann_bin lacks ./models/dict.txt - switching to the managed ref/diann install"
+        warn "Configured diann_bin lacks ./models/dict.txt - switching to the automatic DIA-NN installation"
         diann_bin=""
     fi
     if [[ -n "$diann_bin" ]]; then
         have "DIA-NN ready ($diann_bin)"
         return 0
+    fi
+    if [[ -z "$diann_bin" ]]; then
+        diann_bin="$(find_tool diann-linux || true)"
+        if [[ -n "$diann_bin" ]] && diann_complete "$diann_bin"; then
+            have "DIA-NN ready ($diann_bin, from the conda environment)"
+            return 0
+        fi
+        diann_bin=""
     fi
     if [[ -x /opt/diann/diann-linux ]] && diann_complete /opt/diann/diann-linux; then
         diann_bin="/opt/diann/diann-linux"   # bundled at docker build time
@@ -531,16 +739,44 @@ start_diann_background() {
         rm -rf "$REF_DIR/diann/models"
         rm -f "$REF_DIR/diann/diann-linux"
     fi
-    diann_bin="$REF_DIR/diann/diann-linux"
+    # install destination: the conda environment (same home as STAR/rMATS),
+    # falling back to ref/diann when the env is missing or read-only
+    DIANN_DEST=""
+    if ENV_BIN="$(conda_env_bin)"; then
+        if mkdir -p "$ENV_BIN" 2>/dev/null && { touch "$ENV_BIN/.w" 2>/dev/null && rm -f "$ENV_BIN/.w"; }; then
+            DIANN_DEST="$ENV_BIN"
+        fi
+    fi
+    [[ -z "$DIANN_DEST" ]] && DIANN_DEST="$REF_DIR/diann"
+    diann_bin="$DIANN_DEST/diann-linux"
+    # a concurrent job may already be downloading into the same destination
+    # (fetch_url.sh records the live curl PID next to the part file) -
+    # never start a second download onto the same part file
+    if [[ -f "$DIANN_DEST/diann.zip.part.pid" ]] \
+        && kill -0 "$(cat "$DIANN_DEST/diann.zip.part.pid" 2>/dev/null)" 2>/dev/null; then
+        note "DIA-NN download already in progress by another run - reusing it"
+        provision_dotnet
+        return 0
+    fi
     run_ "DIA-NN not installed yet - downloading 2.6.1 in the background now; it will be ready before Stage 4 (runs alongside the STAR index build and rMATS)"
-    mkdir -p "$REF_DIR/diann"
-    ( bash "$SCRIPT_DIR/scripts/install_diann.sh" "$REF_DIR/diann" \
-        >"$REF_DIR/diann/install.log" 2>&1 ) &
+    note "install destination: $DIANN_DEST"
+    mkdir -p "$DIANN_DEST"
+    ( bash "$SCRIPT_DIR/scripts/install_diann.sh" "$DIANN_DEST" \
+        >"$DIANN_DEST/install.log" 2>&1 ) &
     DIANN_BG_PID=$!
-    note "download log: $REF_DIR/diann/install.log"
+    note "download log: $DIANN_DEST/install.log"
+    # .NET 8 runtime rides along (DIA-NN reads Thermo .raw through it) -
+    # but only when a .raw file is actually around: Bruker-only workflows
+    # get no .NET download; the Stage-4 pre-check provisions on demand.
+    if [[ -z "${ms_dir:-}" ]]; then
+        provision_dotnet
+    elif [[ -d "$ms_dir" ]] && find "$ms_dir" -maxdepth 1 -iname '*.raw' -print -quit 2>/dev/null | grep -q .; then
+        provision_dotnet
+    fi
 }
 
 wait_diann() {
+    [[ -n "$diann_bin" ]] || diann_bin="$(find_tool diann-linux || true)"
     [[ -n "$diann_bin" ]] || diann_bin="$REF_DIR/diann/diann-linux"
     if diann_complete "$diann_bin"; then
         have "DIA-NN ready ($diann_bin)"
@@ -561,25 +797,25 @@ wait_diann() {
     fi
     rm -rf "$REF_DIR/diann/models"          # drop any partial models dir
     [[ -x "$diann_bin" ]] && rm -f "$diann_bin"
-    # the user is blocked here: hit the verified mirror first (GitHub already proved unreachable)
-    DIANN_URL_PRIMARY="https://www.spliceview.cn/static/files/DIA-NN-${diann_version}-Academia-Linux.zip"
     run_ "Installing DIA-NN v$diann_version (log: $REF_DIR/diann/install.log)"
     FETCH_RESUME=1 DL_RATE_LIMIT="" \
         run_streamed "$REF_DIR/diann/install.log" \
         bash "$SCRIPT_DIR/scripts/install_diann.sh" "$REF_DIR/diann" \
         || die "DIA-NN install failed - see $REF_DIR/diann/install.log"
+    # the escalated install always lands in ref/diann: point diann_bin at
+    # it even when the background attempt had chosen the conda env
+    diann_bin="$REF_DIR/diann/diann-linux"
     diann_complete "$diann_bin" \
         || die "DIA-NN installed but models/dict.txt is still missing - the mirror package may be incomplete"
     ok "DIA-NN ready ($diann_bin)"
 }
-
-# ------------------------------------------------------------
+# -----------------------------------------------------------
 # Startup
 # ------------------------------------------------------------
 : "${work_dir:?set work_dir in the config}"
 : "${job_id:?set job_id in the config}"
-[[ "$job_id" =~ ^[A-Za-z0-9._-]+$ ]] \
-    || die "job_id may only contain letters, digits, dot, dash, underscore (got: $job_id)"
+[[ "$job_id" =~ ^[A-Za-z0-9._-]+$ && "$job_id" != *..* ]] \
+    || die "job_id '$job_id' contains unsupported characters - use letters, digits, dot, dash, underscore only (it becomes a path prefix: jobs/<job_id>/, <job_id>_report.parquet, ...)"
 mkdir -p "$work_dir" 2>/dev/null \
     || die "Cannot create work directory: $work_dir — permission denied or invalid path. Set work_dir to a writable absolute path"
 
@@ -591,11 +827,7 @@ exec > >(tee >(sed -u 's/\x1B\[[0-9;]*m//g' >> "$LOG_FILE")) 2>&1
 T0="${SECONDS:-0}"
 STAGE_TIMELINE=()
 
-# ------------------------------------------------------------
-# Run mode: full (stages 1-5, incl. proteomics) | splicing (stages 1-2:
-# rMATS + BioSpliceView annotation / GenBank splice-alteration views)
-# Precedence: env PIPELINE_MODE > config mode > splicing
-# ------------------------------------------------------------
+# Run mode: full (Stages 1-5) | splicing (Stages 1-2)
 PIPELINE_MODE="${PIPELINE_MODE:-${mode:-splicing}}"
 PIPELINE_MODE="${PIPELINE_MODE,,}"
 [[ "$PIPELINE_MODE" =~ ^(full|splicing)$ ]] \
@@ -606,49 +838,70 @@ STAGE_TOTAL=5; [[ "$PIPELINE_MODE" == "splicing" ]] && STAGE_TOTAL=2
 echo ""
 headline "${B}${CYAN}BioSpliceView${R} ${DIM}─${R} ${B}${WHITE}end-to-end splicing pipeline${R}"
 echo -e "  ${DIM}FASTQ ${UI_ARROW} rMATS ${UI_ARROW} BioSpliceView ${UI_ARROW} search DB ${UI_ARROW} DIA-NN ${UI_ARROW} summary${R}"
-kv "job:" "$B$WHITE$job_id$R   ${DIM}mode: $PIPELINE_MODE (stages 1-$STAGE_TOTAL)${R}"
+kv "job:" "${B}${WHITE}$job_id${R}   ${DIM}mode: $PIPELINE_MODE (stages 1-$STAGE_TOTAL)${R}"
 kv "workdir:" "$work_dir ${DIM}(ref/ = shared cache, jobs/$job_id/ = this job)${R}"
 kv "config:" "$CONF"
 kv "log:" "$LOG_FILE"
 
-# ------------------------------------------------------------
-# Defaults (reference configuration)
-# ------------------------------------------------------------
-threads="${threads:-16}"; min_aa="${min_aa:-10}"; p_cutoff="${p_cutoff:-0.05}"
-dl_rate_limit="${dl_rate_limit-2m}"   # ${dl_rate_limit-}: only unset falls back, so empty = unlimited
-export DL_RATE_LIMIT="$dl_rate_limit"      # download bandwidth cap (empty = unlimited)
+# ---- defaults (reference configuration) ----
+threads="${threads:-16}"
+[[ "$threads" =~ ^[0-9]+$ ]] || die "threads must be an integer (got: $threads)"
+min_aa="${min_aa:-10}"
+p_cutoff="${p_cutoff:-0.05}"
 read_type="${read_type:-paired}"; read_length="${read_length:-150}"
+[[ "$read_type" == "paired" || "$read_type" == "single" ]] \
+    || die "read_type must be 'paired' or 'single' (got: $read_type)"
+[[ "$read_length" =~ ^[0-9]+$ ]] || die "read_length must be an integer (got: $read_length)"
 fdr="${fdr:-0.05}"; psi="${psi:-0.05}"; minjc="${minjc:-10}"
-diann_version="${diann_version:-2.6.1}"
-# Full DIA-NN tuning flags, passed verbatim to BOTH commands (4a library +
-# 4b search); the pipeline appends only the file-management arguments
-# (--fasta/--lib/--f/--out-lib/--out) after them. This ONE string is the
-# DIA-NN configuration - edit it in the config to retune the search.
-# DDA data: add --dda to the string.
+# per-transfer download rate cap consumed by the fetch scripts
+# (config: dl_rate_limit; unset -> 2 MB/s like curl --limit-rate 2m,
+# empty -> unlimited)
+DL_RATE_LIMIT="${dl_rate_limit-2m}"
+export DL_RATE_LIMIT
+# DIA-NN: one tuning string, verbatim to both Stage-4 commands
 diann_params="${diann_params:-}"
 if [[ -z "$diann_params" ]]; then
     diann_params="--threads $threads --verbose 1 --qvalue 0.01 --semi --rt-profiling --direct-quant --ids-to-names --min-pep-len 7 --max-pep-len 30 --min-pr-mz 300 --max-pr-mz 1800 --min-pr-charge 1 --max-pr-charge 4 --min-fr-mz 200 --max-fr-mz 1800 --cut K*,R* --missed-cleavages 1 --unimod4 --met-excision"
 fi
-diann_bin="${diann_bin:-}"            # resolved in Stage 0c / start_diann_background
-DIANN_BG_PID=""                       # background download PID (set at the Stage 1 entry)
+# Optional: explicit flags for the library pass (4a). Unset = auto-derived
+# from diann_params (search-only flags dropped). The pipeline still appends
+# the file arguments and the core library flags itself.
+diann_lib_params="${diann_lib_params:-}"
 
 : "${gtf:?set gtf}" "${genome_fa:?set genome_fa}" \
   "${group1:?set group1}" "${group2:?set group2}"
 [[ -f "$gtf" ]]       || die "gtf not found: $gtf"
 [[ -f "$genome_fa" ]] || die "Genome FASTA not found: $genome_fa"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# ------------------------------------------------------------
-# Workspace layout
-# ------------------------------------------------------------
-REF_DIR="$work_dir/ref"                       # shared cache (reused across jobs)
-JOB_DIR="$work_dir/jobs/$job_id"              # all outputs of this job
+# ---- Workspace layout ----
+REF_DIR="$work_dir/ref"
+JOB_DIR="$work_dir/jobs/$job_id"
 mkdir -p "$REF_DIR" "$JOB_DIR"
 
-# ============================================================
+# Serialize ref/ provisioning (proteome, STAR index, DIA-NN) across jobs
+# sharing this work_dir. flock releases automatically when the holder
+# exits or crashes; without flock (e.g. macOS) we proceed unlocked.
+REF_LOCKED=0
+if command -v flock >/dev/null 2>&1; then
+    if exec 9>>"$REF_DIR/.ref.lock" 2>/dev/null && flock -w 600 9 2>/dev/null; then
+        REF_LOCKED=1
+    else
+        warn "Could not lock $REF_DIR within 10 min - continuing unlocked (avoid two jobs on the same work_dir at once)"
+    fi
+fi
+
 banner "0/$STAGE_TOTAL" "Resource preparation & preflight" "cache-first: ref/ and explicit paths" "preflight"
 # ============================================================
 stage_begin
+
+# ---- 0-pre: DIA-NN background download + .NET runtime (full mode) ----
+# non-blocking: the DIA-NN download starts after the proteome fetch (no
+# mirror bandwidth overlap), overlapping the STAR index build and rMATS.
+if [[ "$IS_FULL" == "1" ]]; then
+    start_diann_background
+fi
 
 # --- 0a Background proteome ---
 if [[ "$IS_FULL" == "1" ]]; then
@@ -661,23 +914,15 @@ if [[ -f "$uniprot_fasta" ]]; then
     have "Background proteome ready ($uniprot_fasta)"
 else
     [[ -n "${species:-}" ]] || die "uniprot_fasta not found: $uniprot_fasta"
-    run_ "Downloading UniProt reviewed proteome (species=$species, log: $REF_DIR/uniprot_download.log)"
+    run_ "Downloading background proteome (species=$species, log: $REF_DIR/uniprot_download.log)"
     STREAM_FILTER="uniprot|entries|saved|download|error" STREAM_HEARTBEAT=15 \
     STREAM_WATCH_DIR="$REF_DIR" \
     run_streamed "$REF_DIR/uniprot_download.log" \
         bash "$SCRIPT_DIR/scripts/fetch_background_fasta.sh" "$species" "$uniprot_fasta" \
-    || die "UniProt download failed - see $REF_DIR/uniprot_download.log"
+    || die "Background proteome download failed - see $REF_DIR/uniprot_download.log"
 fi
 else
     have "Background proteome not required (PIPELINE_MODE=splicing)"
-fi
-
-# --- 0-pre: DIA-NN background download (full mode) ---
-# starts after the proteome fetch completes (no mirror bandwidth
-# overlap), still overlapping the STAR index build + the rMATS
-# alignment; Stage 4 collects it via wait_diann
-if [[ "$IS_FULL" == "1" ]]; then
-    start_diann_background
 fi
 
 # --- 0b STAR: locate, then verify the pinned version ---
@@ -686,8 +931,22 @@ star_bin="${star_bin:-}"
 if [[ -z "$star_bin" && -n "${rmats_py:-}" ]]; then
     [[ -x "$(dirname "$rmats_py")/STAR" ]] && star_bin="$(dirname "$rmats_py")/STAR"
 fi
-[[ -z "$star_bin" ]] && star_bin="$(find_tool STAR || true)"
 if [[ -z "$star_bin" ]]; then
+    star_bin="$(find_tool STAR || true)"
+fi
+if [[ -n "$star_bin" ]]; then
+    STAR_V="$("$star_bin" --version 2>/dev/null | head -n1 | awk '{print $1}')"
+    if [[ -n "$star_version" && "$STAR_V" != "$star_version" ]]; then
+        die "STAR version mismatch:
+       found : $star_bin (v$STAR_V)
+       needed: v$star_version (pinned reference version)
+       fix   : conda install -n ${CONDA_ENV_NAME:-bsv-pipeline} -c bioconda star=$star_version"
+    fi
+    star_note=""
+    [[ -n "$STAR_V" ]] && star_note=", v$STAR_V"
+    [[ -n "$star_version" ]] && star_note="${star_note}, matches the pinned version"
+    have "STAR ready ($star_bin$star_note)"
+else
     BASE_HINT="$(conda info --base 2>/dev/null || echo '<conda-base>')"
     die "STAR not found (looked in: managed env '${CONDA_ENV_NAME:-bsv-pipeline}', PATH, active env).
        environment.yml installs STAR at: $BASE_HINT/envs/${CONDA_ENV_NAME:-bsv-pipeline}/bin/STAR
@@ -696,17 +955,6 @@ if [[ -z "$star_bin" ]]; then
          2) conda install -c bioconda star=$star_version
          3) set star_bin in the config"
 fi
-STAR_V="$("$star_bin" --version 2>/dev/null | head -n1 | awk '{print $1}')"
-if [[ -n "$star_version" && "$STAR_V" != "$star_version" ]]; then
-    die "STAR version mismatch:
-       found : $star_bin (v$STAR_V)
-       needed: v$star_version (pinned reference version)
-       fix   : conda install -n ${CONDA_ENV_NAME:-bsv-pipeline} -c bioconda star=$star_version"
-fi
-star_note=""
-[[ -n "$STAR_V" ]] && star_note=", v$STAR_V"
-[[ -n "$star_version" ]] && star_note="${star_note}, matches the pinned version"
-have "STAR ready ($star_bin$star_note)"
 
 star_index="${star_index:-$REF_DIR/star_index}"
 star_index_ok() {  # the files STAR needs before it can even load a genome
@@ -719,14 +967,13 @@ else
         warn "Existing STAR index is incomplete (likely an interrupted build) - rebuilding it now; the finished index will be cached"
     fi
     run_ "Building STAR index (first run: 10-30 min; reused afterwards)"
-    # progress: genomeGenerate drops 5 checkpoint files in this order
     STAR_CK="{ for f in genomeParameters.txt Genome sjdbList.out.tab SA; do [ -e '$star_index/'\$f ] && echo x; done; ls '$star_index'/genomeSAsuffix.* >/dev/null 2>&1 && echo x; true; } | wc -l"
     STREAM_TOTAL=5 STREAM_UNIT="phases" STREAM_COUNT_CMD="$STAR_CK" \
     STREAM_FILTER="^[A-Z][a-z]{2} [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2}|EXITING|FATAL" \
     STREAM_WATCH_DIR="$star_index" \
     run_streamed "$REF_DIR/star_index_build.log" \
-        env STAR_BIN="$star_bin" READ_LENGTH_OVERRIDE="$((read_length - 1))" \
-            bash "$SCRIPT_DIR/scripts/build_star_index.sh" \
+        env STAR_BIN="$star_bin" READ_LENGTH_OVERRIDE="$(( read_length - 1 ))" \
+        bash "$SCRIPT_DIR/scripts/build_star_index.sh" \
             "$genome_fa" "$gtf" "$star_index" "$threads" \
     || die "STAR index build failed — see $REF_DIR/star_index_build.log"
     star_index_ok "$star_index" \
@@ -741,54 +988,42 @@ fi
 # managed env (environment.yml includes pandas) first, then PATH, then the
 # active conda env; a PATH python without pandas (a random active env) is
 # skipped. Explicit python_bin is validated strictly.
-PYTHON_BIN=""
+PYTHON_BIN="${python_bin:-}"
 if [[ -n "${python_bin:-}" ]]; then
-    # explicit config override: validated strictly (this is user intent)
-    if "$python_bin" -c 'import pandas' >/dev/null 2>&1; then
+    if $python_bin -c 'import pandas' >/dev/null 2>&1; then
         PYTHON_BIN="$python_bin"
     else
-        die "python_bin in the config ($python_bin) cannot import pandas - the helper scripts need it.
-       fix: pip install pandas into that interpreter, or point python_bin at one that has it"
+        die "python_bin in the config ($python_bin) cannot import pandas - the helper scripts need it."
     fi
 fi
 if [[ -z "$PYTHON_BIN" ]]; then
     py_cands=()
-    if ENV_BIN="$(conda_env_bin)" && [[ -x "$ENV_BIN/python" ]]; then
-        py_cands+=("$ENV_BIN/python")
+    if ENV_BIN="$(conda_env_bin)"; then
+        [[ -x "$ENV_BIN/python" ]] && py_cands+=("$ENV_BIN/python")
     fi
     command -v python  >/dev/null 2>&1 && py_cands+=("$(command -v python)")
     command -v python3 >/dev/null 2>&1 && py_cands+=("$(command -v python3)")
     [[ -n "${CONDA_PREFIX:-}" && -x "$CONDA_PREFIX/bin/python" ]] && py_cands+=("$CONDA_PREFIX/bin/python")
     for pc in ${py_cands[@]+"${py_cands[@]}"}; do
-        if "$pc" -c 'import pandas' >/dev/null 2>&1; then PYTHON_BIN="$pc"; break; fi
+        if $pc -c 'import pandas' >/dev/null 2>&1; then PYTHON_BIN=$pc; break; fi
     done
     if [[ -z "$PYTHON_BIN" ]]; then
-        BASE_HINT="$(conda info --base 2>/dev/null || echo '<conda-base>')"
-        die "no python with pandas found for the helper scripts (tried: ${py_cands[*]:-none}).
-       fixes (any):
-         1) conda env create -f environment.yml   (includes pandas)
-         2) pip install pandas   into the interpreter you want to use
-         3) set python_bin in the config (absolute path to a python that has pandas)
-       environment.yml installs python at: $BASE_HINT/envs/${CONDA_ENV_NAME:-bsv-pipeline}/bin/python"
+        BASE_HINT=$(conda info --base 2>/dev/null || echo 'no conda')
+        die "no python with pandas found for the helper scripts (tried: ${py_cands[*]:-none})."
     fi
 fi
 have "python ready ($PYTHON_BIN, pandas ok)"
 
 # rMATS: explicit rmats_py wins; otherwise managed env -> PATH -> active env
-rmats_py="${rmats_py:-}"   # initialize: the config may not set it (set -u)
+rmats_py="${rmats_py:-}"
 if [[ -n "$rmats_py" && ! -f "$rmats_py" ]]; then
-    warn "Configured rmats_py not found: $rmats_py - locating rMATS in the managed environment instead"
+    warn "Configured rmats_py not found: $rmats_py (ignored)"
     rmats_py=""
 fi
 [[ -z "$rmats_py" ]] && rmats_py="$(find_tool rmats.py || true)"
 if [[ -z "$rmats_py" ]]; then
-    BASE_HINT="$(conda info --base 2>/dev/null || echo '<conda-base>')"
-    die "rmats.py not found (looked in: managed env '${CONDA_ENV_NAME:-bsv-pipeline}', PATH, active env).
-       environment.yml installs rMATS at: $BASE_HINT/envs/${CONDA_ENV_NAME:-bsv-pipeline}/bin/rmats.py
-       fixes (any):
-         1) conda env create -f environment.yml && conda activate ${CONDA_ENV_NAME:-bsv-pipeline}
-         2) conda install -c bioconda rmats=4.3.0
-         3) set rmats_py in the config"
+    BASE_HINT=$(conda info --base 2>/dev/null || echo 'no conda')
+    die "rmats.py not found (looked in: managed env '${CONDA_ENV_NAME:-bsv-pipeline}', PATH, active env)."
 fi
 RMATS_ENV_PY="$(dirname "$rmats_py")/python"
 RMATS_PY_NOTE="its own env python"
@@ -797,19 +1032,15 @@ if [[ ! -x "$RMATS_ENV_PY" ]]; then
     RMATS_PY_NOTE="pandas python: $PYTHON_BIN"
 fi
 have "rMATS ready ($rmats_py, $RMATS_PY_NOTE)"
+
 if [[ -n "${bsv_repo:-}" ]]; then
     [[ -f "$bsv_repo/scripts/spliceproduce.py" ]] || die "Invalid bsv_repo: $bsv_repo"
     have "BioSpliceView ready (local repo $bsv_repo)"
 else
     BSV_BIN="$(find_tool biospliceview || true)"
     if [[ -z "$BSV_BIN" ]]; then
-        BASE_HINT="$(conda info --base 2>/dev/null || echo '<conda-base>')"
-        die "biospliceview not found (looked in: managed env '${CONDA_ENV_NAME:-bsv-pipeline}', PATH, active env).
-       environment.yml installs it at: $BASE_HINT/envs/${CONDA_ENV_NAME:-bsv-pipeline}/bin/biospliceview
-       fixes (any):
-         1) conda env create -f environment.yml && conda activate ${CONDA_ENV_NAME:-bsv-pipeline}
-         2) pip install https://www.spliceview.cn/static/files/main.tar.gz
-         3) set bsv_repo in the config to a local checkout"
+        BASE_HINT=$(conda info --base 2>/dev/null || echo 'no conda')
+        die "biospliceview not found (looked in: managed env '${CONDA_ENV_NAME:-bsv-pipeline}', PATH, active env)."
     fi
     have "BioSpliceView ready ($BSV_BIN)"
 fi
@@ -818,13 +1049,19 @@ fi
 group1_samples="$(resolve_group "$group1" "${group1_samples:-}")"
 group2_samples="$(resolve_group "$group2" "${group2_samples:-}")"
 
-# --- 0e MS raw files: explicit lists -> prefix match -> unclaimed leftovers ---
-# MS naming is independent of the transcriptome ("what the files are called
-# is what gets displayed"). When a group prefix misses, the unclaimed files
-# are auto-assigned if their count equals the group's FASTQ sample count;
-# anything ambiguous is reported, never guessed.
+# --- 0e MS raw files: filename-agnostic ---
+# whatever is in ms_dir is used as-is: sorted order, the first N1 files
+# go to group1, the rest to group2 (N1/N2 = each group's FASTQ
+# replicate count). No filename matching, no naming requirements.
+# Explicit group1_ms_files / group2_ms_files override the split.
 count_list() { local IFS=,; read -ra _a <<< "$1"; echo ${#_a[@]}; }
-norm_path() { realpath "$1" 2>/dev/null || echo "$1"; }
+join_lists() {  # join_lists <list...>: comma-join non-empty lists
+    local out="" l
+    for l in "$@"; do
+        if [[ -n "$l" ]]; then out="${out:+$out,}$l"; fi
+    done
+    printf '%s' "$out"
+}
 list_ms_dir() {  # all .d/.raw under a directory, natural order
     local dir="$1" f out=()
     for f in "$dir"/*; do
@@ -835,68 +1072,82 @@ list_ms_dir() {  # all .d/.raw under a directory, natural order
 ' "${out[@]}" | sort -V
     return 0
 }
-ms_prefix_match() {  # <dir> <group-prefix> -> matched files, one per line
-    local dir="$1" name="$2" f out=()
-    for f in "$dir"/"$name"-* "$dir"/"$name"_*; do
-        [[ -e "$f" ]] || continue
-        case "$f" in *.d|*.D|*.raw|*.RAW) out+=("$f") ;; esac
-    done
-    ((${#out[@]})) || return 1
-    printf '%s
-' "${out[@]}" | sort -V
-}
 if [[ "$IS_FULL" == "1" ]]; then
 group1_ms_files="${group1_ms_files:-}"
 group2_ms_files="${group2_ms_files:-}"
+# DDA-aided workflow: DIA acquisitions for --f-dia (quantification only).
+# Explicit lists only - never auto-discovered from ms_dir; any file listed
+# here is excluded from the DDA set below.
+group1_dia_ms_files="${group1_dia_ms_files:-}"
+group2_dia_ms_files="${group2_dia_ms_files:-}"
+if [[ -n "$group1_dia_ms_files" || -n "$group2_dia_ms_files" ]] \
+   && [[ "$diann_params" != *"--dda"* ]]; then
+    die "group1_dia_ms_files / group2_dia_ms_files need the DDA-aided workflow: add --dda to diann_params (--f carries the DDA runs, --f-dia the DIA runs)"
+fi
 if [[ -z "$group1_ms_files" || -z "$group2_ms_files" ]]; then
     [[ -n "${ms_dir:-}" ]] || die "MS files: set ms_dir, or explicit group1_ms_files / group2_ms_files in the config"
     [[ -d "$ms_dir" ]]     || die "ms_dir not found: $ms_dir"
     MS_ALL="$(list_ms_dir "$ms_dir")"
     [[ -n "$MS_ALL" ]] || die "No .d/.raw files found in $ms_dir"
-    for g in 1 2; do
-        gname_var="group${g}"; gname="${!gname_var}"
-        out_var="group${g}_ms_files"
-        [[ -n "${!out_var}" ]] && continue
-        if match="$(ms_prefix_match "$ms_dir" "$gname")"; then
-            n="$(echo "$match" | grep -c .)"
-            run_ "Group $gname: auto-discovered $n MS files (prefix match)" >&2
-            while read -r f; do note "$(basename "$f")" >&2; done <<< "$match"
-            printf -v "$out_var" '%s' "$(echo "$match" | paste -sd, -)"
-        fi
+    mapfile -t _ms_all <<< "$MS_ALL"
+    # configured DIA files must not leak into the DDA set (they would be
+    # searched twice and would poison the positional split)
+    if [[ -n "$group1_dia_ms_files" || -n "$group2_dia_ms_files" ]]; then
+        _ddas=()
+        for f in "${_ms_all[@]}"; do
+            _skip=0
+            for d in ${group1_dia_ms_files//,/ } ${group2_dia_ms_files//,/ }; do
+                if [[ "$f" == "$d" || "$(basename "$f")" == "$(basename "$d")" ]]; then
+                    note "excluding $(basename "$f") from the DDA set (configured as DIA input)"
+                    _skip=1
+                    break
+                fi
+            done
+            (( _skip )) || _ddas+=("$f")
+        done
+        _ms_all=("${_ddas[@]+"${_ddas[@]}"}")
+    fi
+    (( ${#_ms_all[@]} > 0 )) || die "No DDA files left in $ms_dir after excluding the configured DIA files"
+    N1="$(count_list "$group1_samples")"; N2="$(count_list "$group2_samples")"
+    run_ "MS files: ${#_ms_all[@]} found in ms_dir - used as-is"
+    g1=(); g2=()
+    matched=0
+    # strategy 1: when filenames happen to carry the group prefixes,
+    # use them (biologically safe assignment for prefix-named data)
+    for f in "${_ms_all[@]}"; do
+        case "$(basename "$f")" in "$group1"-*|"$group1".*|"$group1"_*) g1+=("$f") ;; esac
+    done
+    for f in "${_ms_all[@]}"; do
+        case "$(basename "$f")" in "$group2"-*|"$group2".*|"$group2"_*) g2+=("$f") ;; esac
+    done
+    if (( ${#g1[@]} > 0 && ${#g2[@]} > 0 && ${#g1[@]} + ${#g2[@]} == ${#_ms_all[@]} )); then
+        matched=1
+        note "assigned by filename prefixes: ${#g1[@]} x $group1, ${#g2[@]} x $group2"
+    else
+        # strategy 2: filenames carry no group info - positional split
+        g1=(); g2=()
+        for idx in "${!_ms_all[@]}"; do
+            if (( idx < N1 )); then g1+=("${_ms_all[idx]}")
+            else g2+=("${_ms_all[idx]}"); fi
+        done
+        warn "filenames carry no group prefixes - assigning by sorted order: first $N1 to $group1, next ${#g2[@]} to $group2"
+        warn "verify the mapping below, or set explicit group1_ms_files / group2_ms_files"
+    fi
+    printf -v group1_ms_files '%s' "$(IFS=,; echo "${g1[*]}")"
+    printf -v group2_ms_files '%s' "$(IFS=,; echo "${g2[*]}")"
+    for f in "${g1[@]}"; do note "$(basename "$f")  ${UI_ARROW}  $group1"; done
+    for f in "${g2[@]}"; do note "$(basename "$f")  ${UI_ARROW}  $group2"; done
+fi
+# DIA files: existence check + per-file mapping print
+if [[ -n "$group1_dia_ms_files" || -n "$group2_dia_ms_files" ]]; then
+    for f in ${group1_dia_ms_files//,/ } ${group2_dia_ms_files//,/ }; do
+        [[ -e "$f" ]] || die "DIA file not found: $f"
+    done
+    note "DIA files (--f-dia): $(count_list "$group1_dia_ms_files") x $group1, $(count_list "$group2_dia_ms_files") x $group2"
+    for f in ${group1_dia_ms_files//,/ } ${group2_dia_ms_files//,/ }; do
+        note "$(basename "$f")"
     done
 fi
-# leftovers fallback: hand the unclaimed files to the group(s) still empty,
-# but only when the count matches that group's FASTQ sample count
-    MS_ALL="${MS_ALL:-}"
-    CLAIMED=()
-    [[ -n "$group1_ms_files" ]] && { IFS=, read -ra _c1 <<< "$group1_ms_files"; for _c in "${_c1[@]}"; do CLAIMED+=("$(norm_path "$_c")"); done; }
-    [[ -n "$group2_ms_files" ]] && { IFS=, read -ra _c2 <<< "$group2_ms_files"; for _c in "${_c2[@]}"; do CLAIMED+=("$(norm_path "$_c")"); done; }
-    LEFT=()
-    while IFS= read -r _f; do
-        [[ -n "$_f" ]] || continue
-        _f="$(norm_path "$_f")"
-        _skip=0
-        for _c in "${CLAIMED[@]}"; do
-            [[ "$_f" == "$_c" ]] && { _skip=1; break; }
-        done
-        [[ "$_skip" == 0 ]] && LEFT+=("$_f")
-    done <<< "$MS_ALL" || true
-    for g in 1 2; do
-        out_var="group${g}_ms_files"
-        [[ -n "${!out_var}" ]] && continue
-        gname_var="group${g}"; gname="${!gname_var}"
-        samp_var="group${g}_samples"; n_exp="$(count_list "${!samp_var}")"
-        n_left=${#LEFT[@]}
-        if [[ "$n_left" -eq "$n_exp" && "$n_left" -gt 0 ]]; then
-            run_ "Group $gname: auto-assigned $n_left unclaimed MS files (name-independent)" >&2
-            for _f in "${LEFT[@]}"; do note "$(basename "$_f")" >&2; done
-            printf -v "$out_var" '%s' "$(IFS=,; echo "${LEFT[*]}")"
-            LEFT=()
-        fi
-    done
-    if [[ -z "$group1_ms_files" || -z "$group2_ms_files" ]]; then
-        die "MS file assignment incomplete (${#LEFT[@]} unclaimed). Name the files with the group prefixes, or set explicit group1_ms_files / group2_ms_files in the config"
-    fi
 else
     note "MS raw files not required (PIPELINE_MODE=splicing)"
 fi
@@ -917,6 +1168,10 @@ fi
 
 ok "Resources and environment ready"
 stage_end
+
+if (( REF_LOCKED )); then
+    exec 9>&- 2>/dev/null || true   # ref/ provisioning done - release the lock
+fi
 
 # ------------------------------------------------------------
 # Per-job output layout
@@ -950,6 +1205,11 @@ if [[ "$IS_FULL" == "1" ]]; then
     echo -e "  ${DIM}DB${R}      minAA=$min_aa, background=$(basename "$uniprot_fasta")"
     echo -e "  ${DIM}DIA-NN${R}  v$diann_version$DIANN_STATE"
     echo -e "  ${DIM}params${R}  $diann_params"
+    if [[ -n "$diann_lib_params" ]]; then
+        echo -e "  ${DIM}lib-params${R}  $diann_lib_params ${DIM}(4a verbatim)${R}"
+    else
+        echo -e "  ${DIM}lib-params${R} auto-derived from params (search-only flags dropped)"
+    fi
     echo -e "  ${DIM}summary${R} nominal p < $p_cutoff (exploratory)"
 fi
 
@@ -967,10 +1227,15 @@ RMATS_DONE=1
 for _ev in SE A5SS A3SS MXE RI; do
     [[ -s "$RMATS_DIR/${_ev}.MATS.JC.txt" ]] || { RMATS_DONE=0; break; }
 done
-if (( RMATS_DONE )); then
+rmats_fp_text="gtf=$gtf fa=$genome_fa idx=$star_index t=$read_type rl=$read_length s1=$group1_samples s2=$group2_samples"
+if (( RMATS_DONE )) \
+   && [[ -f "$RMATS_DIR/.params" && "$(cat "$RMATS_DIR/.params" 2>/dev/null)" == "$rmats_fp_text" ]] \
+   && ! [[ "$star_index/Genome" -nt "$RMATS_DIR/SE.MATS.JC.txt" ]]; then
     skip "rMATS outputs already exist ($RMATS_DIR)"
 else
-    if compgen -G "$RMATS_DIR/*.MATS.JC.txt" > /dev/null; then
+    if (( RMATS_DONE )); then
+        warn "rMATS parameters or inputs changed since the last run - rerunning Stage 1"
+    elif compgen -G "$RMATS_DIR/*.MATS.JC.txt" > /dev/null; then
         warn "rMATS outputs incomplete (interrupted run) - rerunning Stage 1"
     fi
     printf '%s\n' "$group1_samples" > "$RMATS_DIR/s1.txt"
@@ -1002,6 +1267,7 @@ else
       run_streamed "$RMATS_DIR/rmats_run.log" "$RMATS_ENV_PY" "$rmats_py" "${RMATS_ARGS[@]}"
     ) || die "rMATS failed - see $RMATS_DIR/rmats_run.log"
     ok "rMATS done -> $RMATS_DIR"
+    printf '%s\n' "$rmats_fp_text" > "$RMATS_DIR/.params"
 fi
 stage_end
 
@@ -1009,9 +1275,19 @@ stage_end
 banner "2/$STAGE_TOTAL" "BioSpliceView event annotation" "CDS reconstruction / NMD / GenBank" "BioSpliceView"
 # ============================================================
 stage_begin
-if [[ -f "$BSV_XLSX" ]]; then
+bsv_fp_text="fdr=$fdr psi=$psi minjc=$minjc | $rmats_fp_text"
+bsv_valid=0
+if [[ -f "$BSV_XLSX" && -f "$BSV_DIR/.params" ]] \
+   && [[ "$(cat "$BSV_DIR/.params" 2>/dev/null)" == "$bsv_fp_text" ]]; then
+    bsv_valid=1
+    for _ev in SE A5SS A3SS MXE RI; do
+        [[ "$RMATS_DIR/${_ev}.MATS.JC.txt" -nt "$BSV_XLSX" ]] && bsv_valid=0
+    done
+fi
+if (( bsv_valid )); then
     skip "$BSV_XLSX"
 else
+    [[ -f "$BSV_XLSX" ]] && warn "BioSpliceView parameters or rMATS inputs changed - rerunning Stage 2"
     if [[ -n "${bsv_repo:-}" ]]; then
         run_ "Running from local repo ($bsv_repo)"
         STREAM_FILTER="." STREAM_WATCH_DIR="$BSV_DIR" \
@@ -1036,6 +1312,7 @@ else
     fi
     [[ -f "$BSV_XLSX" ]] || die "BioSpliceView finished but $BSV_XLSX is missing"
     ok "Done -> $BSV_XLSX"
+    printf '%s\n' "$bsv_fp_text" > "$BSV_DIR/.params"
 fi
 stage_end
 
@@ -1044,8 +1321,9 @@ if [[ "$IS_FULL" == "1" ]]; then
 banner "3/$STAGE_TOTAL" "Search database" "UniProt background + splice-derived proteins" "search DB"
 # ============================================================
 stage_begin
+bsv_sheet="${bsv_sheet:-All_Significant}"
 DB_FP="$DB_DIR/.params"
-db_fp_text="fdr=$fdr psi=$psi minjc=$minjc min_aa=$min_aa prot=$(basename "$uniprot_fasta")"
+db_fp_text="fdr=$fdr psi=$psi minjc=$minjc min_aa=$min_aa sheet=$bsv_sheet prot=$(basename "$uniprot_fasta")"
 if [[ -f "$COMBINED_FA" && -f "$ANNOT_TSV" ]]; then
     if [[ -f "$DB_FP" && "$(cat "$DB_FP" 2>/dev/null)" != "$db_fp_text" ]]; then
         warn "Stage 3 parameters changed - rebuilding the search database"
@@ -1059,7 +1337,7 @@ if [[ ! -f "$COMBINED_FA" || ! -f "$ANNOT_TSV" ]]; then
     "$PYTHON_BIN" "$SCRIPT_DIR/scripts/merge_db.py" \
         --results-xlsx "$BSV_XLSX" --uniprot-fasta "$uniprot_fasta" \
         --out-fasta "$COMBINED_FA" --out-annotation "$ANNOT_TSV" \
-        --min-aa "$min_aa"
+        --sheet "$bsv_sheet" --min-aa "$min_aa"
     printf '%s\n' "$db_fp_text" > "$DB_FP"
     ok "Search DB done -> $COMBINED_FA"
 fi
@@ -1074,8 +1352,8 @@ banner "4/$STAGE_TOTAL" "DIA-NN search" "$diann_mode_txt + DIA quantification" "
 stage_begin
 LIB_FP="$DIANN_DIR/.lib_params"
 SEARCH_FP="$DIANN_DIR/.search_params"
-lib_fp_text="db:$db_fp_text | v$diann_version | $diann_params"
-search_fp_text="$lib_fp_text | ms1=$group1_ms_files ms2=$group2_ms_files"
+lib_fp_text="db:$db_fp_text | v$diann_version | $diann_params | lib=${diann_lib_params:-}"
+search_fp_text="$lib_fp_text | ms1=$group1_ms_files ms2=$group2_ms_files | dia1=${group1_dia_ms_files:-} dia2=${group2_dia_ms_files:-}"
 if [[ -f "$PR_MATRIX" ]]; then
     if [[ -f "$SEARCH_FP" && "$(cat "$SEARCH_FP" 2>/dev/null)" != "$search_fp_text" ]]; then
         warn "DIA-NN parameters or MS inputs changed - rerunning the search"
@@ -1086,28 +1364,47 @@ if [[ -f "$PR_MATRIX" ]]; then
 fi
 if [[ ! -f "$PR_MATRIX" ]]; then
     wait_diann   # collect the background download (started before Stage 1)
-    if [[ -s "$SPECLIB" && -f "$LIB_FP" && "$(cat "$LIB_FP" 2>/dev/null)" != "$lib_fp_text" ]]; then
-        warn "Search database or DIA-NN parameters changed - regenerating the spectral library"
-        rm -f "$SPECLIB"
-    fi
-    [[ -f "$SPECLIB" && ! -s "$SPECLIB" ]] && { rm -f "$SPECLIB"; warn "Removed empty spectral library from a failed run"; }
+
+    # --- 4b-pre: .NET runtime for Thermo .raw inputs (provisioned at
+    # Stage 0; cheap idempotent re-check for direct Stage-4 entry points).
+    # Bruker .d workflows never touch .NET, so no download is triggered.
+    HAS_RAW=0
+    for _msf in ${group1_ms_files//,/ } ${group2_ms_files//,/ } \
+                ${group1_dia_ms_files//,/ } ${group2_dia_ms_files//,/ }; do
+        if [[ "$_msf" == *.raw ]]; then HAS_RAW=1; fi
+    done
+    if [[ "$HAS_RAW" == "1" ]]; then provision_dotnet; fi
+
     if [[ ! -s "$SPECLIB" ]]; then
         run_ "4a Predicted spectral library (log: $DIANN_DIR/diann_lib.log)"
-        # --reanalyse (MBR) and the mass accuracies are main-search
-        # parameters - meaningless in a library-generation-only pass.
-        # Filter them here, together with their values (state machine:
-        # after one of these flags, the next token is its value).
+        # 4a flags: an explicit diann_lib_params is used verbatim (the file
+        # arguments below are appended either way); otherwise derive from
+        # diann_params - search-only flags (--reanalyse/--semi/
+        # --rt-profiling/--direct-quant/--ids-to-names/--qvalue/
+        # --min-fr-mz/--max-fr-mz/--dda and the mass accuracies) are
+        # meaningless in library generation and some of them slow it down
+        # hours, so they are dropped together with their values (state
+        # machine: after a value-taking flag, the next token is its value).
         lib_args=(--fasta "$COMBINED_FA" --fasta-search --gen-spec-lib --predictor)
-        pa= skip_next=0
-        for pa in "${DIANN_PARAMS_ARR[@]}"; do
-            if (( skip_next )); then skip_next=0; continue; fi
-            case "$pa" in
-                --mass-acc|--mass-acc-ms1) skip_next=1 ;;   # value-taking
-                --reanalyse) ;;                             # boolean
-                --reanalyse=*|--mass-acc=*|--mass-acc-ms1=*) ;;
-                *) lib_args+=("$pa") ;;
+        if [[ -n "${diann_lib_params:-}" ]]; then
+            case " ${diann_lib_params} " in
+                *" --semi "*|*" --semi="*)
+                    warn "diann_lib_params contains --semi - the in-silico digest balloons and 4a can stretch from minutes to hours (README); kept verbatim as configured" ;;
             esac
-        done
+            read -ra _lib_user <<< "$diann_lib_params"
+            lib_args+=("${_lib_user[@]+"${_lib_user[@]}"}")
+        else
+            pa= skip_next=0
+            for pa in "${DIANN_PARAMS_ARR[@]}"; do
+                if (( skip_next )); then skip_next=0; continue; fi
+                case "$pa" in
+                    --mass-acc|--mass-acc-ms1|--qvalue|--min-fr-mz|--max-fr-mz) skip_next=1 ;;   # value-taking, search-only
+                    --reanalyse|--semi|--rt-profiling|--direct-quant|--ids-to-names|--dda) ;;    # boolean, search-only
+                    --reanalyse=*|--semi=*|--rt-profiling=*|--direct-quant=*|--ids-to-names=*|--dda=*|--mass-acc=*|--mass-acc-ms1=*|--qvalue=*|--min-fr-mz=*|--max-fr-mz=*) ;;
+                    *) lib_args+=("$pa") ;;
+                esac
+            done
+        fi
         lib_args+=(--out-lib "$DIANN_DIR/${job_id}_predicted_library.tsv")
         printf -v lib_cmd "%s " "$diann_bin" "${lib_args[@]}"; lib_cmd="${lib_cmd% }"
         note "cmd: $lib_cmd"
@@ -1128,6 +1425,13 @@ if [[ ! -f "$PR_MATRIX" ]]; then
     for f in ${group1_ms_files//,/ } ${group2_ms_files//,/ }; do
         search_args+=(--f "$f")
     done
+    # DDA-aided workflow: DIA acquisitions ride in via --f-dia (quantified
+    # against the DDA-aided library; never pre-processed as DDA)
+    if [[ "$diann_params" == *"--dda"* ]]; then
+        for f in ${group1_dia_ms_files//,/ } ${group2_dia_ms_files//,/ }; do
+            search_args+=(--f-dia "$f")
+        done
+    fi
     search_args+=("--lib" "$SPECLIB" "--fasta" "$COMBINED_FA" \
         --out "$DIANN_OUT" \
         "${DIANN_PARAMS_ARR[@]}")
@@ -1137,14 +1441,34 @@ if [[ ! -f "$PR_MATRIX" ]]; then
     esac
     printf -v search_cmd "%s " "$diann_bin" "${search_args[@]}"; search_cmd="${search_cmd% }"
     note "cmd: $search_cmd"
-    # progress: DIA-NN processes each raw file in two passes (pre-
-    # processing, then analysis), so the step total is 2 x the file count
-    N_MS=$(( $(count_list "$group1_ms_files") + $(count_list "$group2_ms_files") ))
-    STREAM_FILTER="processing|error|warn" STREAM_HEARTBEAT=60 STREAM_WATCH_DIR="$DIANN_DIR" \
-    STREAM_TOTAL=$((2 * N_MS)) STREAM_UNIT="passes (2 per file)" \
-    STREAM_COUNT_CMD="grep -cE 'Pre-processing|Analys' '$DIANN_DIR/diann_search.log' 2>/dev/null; true" \
-    run_streamed "$DIANN_DIR/diann_search.log" "$diann_bin" "${search_args[@]}" \
-        || die "DIA-NN search failed - see $DIANN_DIR/diann_search.log"
+    # progress denominator = the REAL file count; the two phases DIA-NN
+    # runs sequentially (pre-processing every input, then analysing them)
+    # are reported SEPARATELY - the counter emits "<n>:<phase-label>" and
+    # the bar switches to the current phase instead of merging both into
+    # a misleading "2 per file" pass count
+    N_MS=$(( $(count_list "$group1_ms_files") + $(count_list "$group2_ms_files")
+             + $(count_list "${group1_dia_ms_files:-}") + $(count_list "${group2_dia_ms_files:-}") ))
+    diann_run_search() {  # one streamed 4b attempt (env may change between attempts)
+        STREAM_FILTER="pre-processing|analys|error|warn" STREAM_HEARTBEAT=60 STREAM_WATCH_DIR="$DIANN_DIR" \
+        STREAM_TOTAL=$N_MS STREAM_UNIT="files" \
+        STREAM_COUNT_CMD="{ _pp=\$(grep -c 'Pre-processing' '$DIANN_DIR/diann_search.log' 2>/dev/null || true); _an=\$(grep -c 'Analys' '$DIANN_DIR/diann_search.log' 2>/dev/null || true); if [[ \$_an -gt 0 ]]; then echo \"\$_an:analysis\"; else echo \"\$_pp:pre-processing\"; fi; }" \
+        run_streamed "$DIANN_DIR/diann_search.log" "$diann_bin" "${search_args[@]}"
+    }
+    if diann_run_search; then
+        :
+    elif [[ "${HAS_RAW:-0}" == "1" ]]; then
+        # README-promised recovery: the classic Thermo-.raw killer is a bad
+        # .NET host resolution ("hostfxr init failed: 0x80008096") - DIA-NN
+        # could not use the runtime its RawWrapper asked for. Install a
+        # clean pinned runtime into ref/dotnet, point DOTNET_ROOT at that
+        # directory and retry once.
+        warn "DIA-NN search failed - installing a clean pinned .NET runtime into ref/dotnet and retrying once"
+        provision_dotnet force
+        diann_run_search \
+            || die "DIA-NN search failed after the .NET retry - see $DIANN_DIR/diann_search.log"
+    else
+        die "DIA-NN search failed - see $DIANN_DIR/diann_search.log"
+    fi
     [[ -f "$PR_MATRIX" ]] || die "DIA-NN finished but $PR_MATRIX is missing (add --matrices to diann_params)"
     printf '%s\n' "$search_fp_text" > "$SEARCH_FP"
     ok "DIA-NN done -> $PR_MATRIX"
@@ -1155,12 +1479,16 @@ stage_end
 banner "5/$STAGE_TOTAL" "Splice-peptide summary" "exploratory between-group comparison" "summary"
 # ============================================================
 stage_begin
-if [[ -f "$SUMMARY_XLSX" ]]; then
+MS1_NAMES="$(join_lists "$group1_ms_files" "${group1_dia_ms_files:-}" | tr ',' '\n' | sed 's|.*/||' | paste -sd, -)"
+MS2_NAMES="$(join_lists "$group2_ms_files" "${group2_dia_ms_files:-}" | tr ',' '\n' | sed 's|.*/||' | paste -sd, -)"
+SUM_FP="$SUM_DIR/.params"
+sum_fp_text="p=$p_cutoff | g1=$group1:$MS1_NAMES | g2=$group2:$MS2_NAMES"
+if [[ -f "$SUMMARY_XLSX" && -f "$SUM_FP" && "$(cat "$SUM_FP" 2>/dev/null)" == "$sum_fp_text" ]] \
+   && ! [[ "$PR_MATRIX" -nt "$SUMMARY_XLSX" ]]; then
     skip "$SUMMARY_XLSX"
 else
+    [[ -f "$SUMMARY_XLSX" ]] && warn "Summary parameters or upstream outputs changed - regenerating"
     run_ "Mapping splice peptides back to events"
-    MS1_NAMES="$(echo "$group1_ms_files" | tr ',' '\n' | sed 's|.*/||' | paste -sd, -)"
-    MS2_NAMES="$(echo "$group2_ms_files" | tr ',' '\n' | sed 's|.*/||' | paste -sd, -)"
     "$PYTHON_BIN" "$SCRIPT_DIR/scripts/summarize_splice_peptides.py" \
         --pr-matrix "$PR_MATRIX" \
         --annotation "$ANNOT_TSV" \
@@ -1169,6 +1497,7 @@ else
         --p-cutoff "$p_cutoff" \
         --out "$SUMMARY_XLSX"
     ok "Summary done -> $SUMMARY_XLSX"
+    printf '%s\n' "$sum_fp_text" > "$SUM_FP"
 fi
 stage_end
 
@@ -1190,16 +1519,16 @@ fi
 # Final summary
 # ============================================================
 echo ""
-headline "${B}${GREEN}Pipeline complete${R} ${DIM}─${R} ${DIM}job: $job_id${R}"
+ui_box "${B}${GREEN}Pipeline complete${R} ${DIM}${UI_SEP}${R} ${DIM}job: $job_id${R}"
 echo -e "  ${B}${WHITE}total${R} $(fmt_secs $(( (${SECONDS:-0}) - T0 )))"
 echo ""
 headline "${B}${WHITE}Final deliverables${R} ${DIM}─${R} ${DIM}$FINAL_DIR${R}"
-if [[ "$IS_FULL" == "1" ]]; then echo -e "  ${GREEN}→${R} ${job_id}_combined_search_db.fasta      ${DIM}merged search database${R}"; fi
-if [[ "$IS_FULL" == "1" ]]; then echo -e "  ${GREEN}→${R} ${job_id}_event_annotation.tsv          ${DIM}peptide-to-event traceability${R}"; fi
-echo -e "  ${GREEN}→${R} ${job_id}_BioSpliceView_results.xlsx    ${DIM}CDS/NMD annotation (all events)${R}"
-echo -e "  ${GREEN}→${R} ${job_id}_GenBank/                      ${DIM}dual GenBank views per event${R}"
-if [[ "$IS_FULL" == "1" ]]; then echo -e "  ${GREEN}→${R} ${job_id}_pr_matrix.tsv                 ${DIM}DIA-NN quantities (1% FDR)${R}"; fi
-if [[ "$IS_FULL" == "1" ]]; then echo -e "  ${GREEN}→${R} ${job_id}_peptide_summary.xlsx          ${DIM}event-mapped splice-peptide evidence${R}"; fi
+if [[ "$IS_FULL" == "1" ]]; then echo -e "  ${GREEN}${UI_ARROW}${R} ${job_id}_combined_search_db.fasta      ${DIM}merged search database${R}"; fi
+if [[ "$IS_FULL" == "1" ]]; then echo -e "  ${GREEN}${UI_ARROW}${R} ${job_id}_event_annotation.tsv          ${DIM}peptide-to-event traceability${R}"; fi
+echo -e "  ${GREEN}${UI_ARROW}${R} ${job_id}_BioSpliceView_results.xlsx    ${DIM}CDS/NMD annotation (all events)${R}"
+echo -e "  ${GREEN}${UI_ARROW}${R} ${job_id}_GenBank/                      ${DIM}dual GenBank views per event${R}"
+if [[ "$IS_FULL" == "1" ]]; then echo -e "  ${GREEN}${UI_ARROW}${R} ${job_id}_pr_matrix.tsv                 ${DIM}DIA-NN quantities (1% FDR)${R}"; fi
+if [[ "$IS_FULL" == "1" ]]; then echo -e "  ${GREEN}${UI_ARROW}${R} ${job_id}_peptide_summary.xlsx          ${DIM}event-mapped splice-peptide evidence${R}"; fi
 echo ""
 headline "${B}${WHITE}Stage timings${R}"
 local_total=$(( (${SECONDS:-0}) - T0 ))
@@ -1207,6 +1536,7 @@ for entry in "${STAGE_TIMELINE[@]}"; do
     lbl="${entry%%|*}"; secs="${entry##*|}"
     echo -e "  $(printf '%-22s %8s' "$lbl" "$(fmt_secs "$secs")")"
 done
+echo -e "  ${DIM}$(printf -- "${UI_H}%.0s" $(seq 1 32))${R}"
 echo -e "  ${B}${WHITE}$(printf '%-22s %8s' "total" "$(fmt_secs "$local_total")")${R}"
 echo -e "  ${DIM}Heavy-tool logs: rmats_run.log / bsv_run.log / diann_*.log / star_index_build.log${R}"
 echo -e "  ${DIM}Shared cache (ref/, reused by future jobs): $REF_DIR${R}"

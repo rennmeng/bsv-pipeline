@@ -5,7 +5,8 @@
 #
 # Provides rMATS 4.3.0 (with STAR 2.7.10b) + BioSpliceView + analysis deps.
 # DIA-NN is not installed here (license/binary); STAGE 0 handles it as
-# configured.
+# configured, and provisions the .NET runtime on first run (needed
+# by DIA-NN for Thermo .raw files).
 name: bsv-pipeline
 channels:
   - conda-forge
@@ -18,7 +19,7 @@ dependencies:
   - pip
   - pip:
       - -r requirements.txt       # pandas / numpy / scipy / openpyxl / pyfaidx / biopython
-      # ---- BioSpliceView ----
-      # mirror by default; if GitHub is reachable, switch to:
-      #   - git+https://github.com/rennmeng/BioSpliceView.git
-      - https://www.spliceview.cn/static/files/main.tar.gz
+      # ---- BioSpliceView (pinned GitHub tag, same primary source as the
+      #      Dockerfile; if GitHub is unreachable switch to the mirror): ----
+      #   - https://www.spliceview.cn/static/files/main.tar.gz
+      - https://github.com/rennmeng/BioSpliceView/archive/refs/tags/v1.0.1.tar.gz
