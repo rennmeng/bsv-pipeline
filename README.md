@@ -50,12 +50,14 @@ docker build -t bsv-pipeline:1.1.0 .
 
 Before running the pipeline, prepare the following inputs:
 
-1. Transcriptome data: paired-end FASTQ files for both condition groups,
-   placed in `fastq_dir` and named with the group prefixes (see
-   "Transcriptome sample grouping" below).
+1. Transcriptome data: paired-end FASTQ files for both condition groups
+   (the example RNA sequencing dataset is available from GEO under
+   accession GSE264294), placed in `fastq_dir` and named with the group
+   prefixes (see "Transcriptome sample grouping" below).
 2. Proteome data: mass-spectrometry acquisitions (Bruker `.d` or Thermo
-   `.raw`) from matching conditions, placed in `ms_dir`; required for
-   `mode=full` only, splicing mode needs none.
+   `.raw`) from matching conditions (the example proteome dataset is
+   available from ProteomeXchange under accession PXD051806), placed in
+   `ms_dir`; required for `mode=full` only, splicing mode needs none.
 3. Genome reference: the genome FASTA (`genome_fa`) and a matched
    annotation GTF (`gtf`), both from the same species and genome build as
    the background proteome.
@@ -139,13 +141,6 @@ discovery.
 (which sets the rMATS `readLength` and the STAR index overhang) and to
 screen for TruSeq/Nextera adapter or polyA/polyG contamination, warning
 above 5% so the data can be pre-trimmed with fastp/cutadapt.
-
-## Example data
-
-The RNA sequencing dataset was obtained from GEO (GSE264294) and the
-proteome dataset from ProteomeXchange (PXD051806); place the FASTQ files
-under `fastq_dir` using the `WT-*` / `KO-*` naming scheme described above,
-and the mass-spectrometry acquisitions under `ms_dir`.
 
 ## Work directory
 
