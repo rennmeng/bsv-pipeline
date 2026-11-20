@@ -43,8 +43,22 @@ work directory.
 A Docker image is provided as an alternative:
 
 ```bash
-docker build -t bsv-pipeline:1.0 .
+docker build -t bsv-pipeline:1.1.0 .
 ```
+
+## Data preparation
+
+Before running the pipeline, prepare the following inputs:
+
+1. Transcriptome data: paired-end FASTQ files for both condition groups,
+   placed in `fastq_dir` and named with the group prefixes (see
+   "Transcriptome sample grouping" below).
+2. Proteome data: mass-spectrometry acquisitions (Bruker `.d` or Thermo
+   `.raw`) from matching conditions, placed in `ms_dir`; required for
+   `mode=full` only, splicing mode needs none.
+3. Genome reference: the genome FASTA (`genome_fa`) and a matched
+   annotation GTF (`gtf`), both from the same species and genome build as
+   the background proteome.
 
 ## Quick start
 
@@ -69,7 +83,7 @@ downstream of it. Pure performance knobs (`threads`, `dl_rate_limit`,
 An equivalent Docker invocation:
 
 ```bash
-docker run --rm -v /data:/data bsv-pipeline:1.0 /data/pipeline.conf
+docker run --rm -v /data:/data bsv-pipeline:1.1.0 /data/pipeline.conf
 ```
 
 ## Tool provisioning
