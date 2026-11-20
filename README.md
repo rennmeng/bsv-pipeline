@@ -56,28 +56,15 @@ cp template/full.conf pipeline.conf     # splicing-only analysis: template/splic
 bash run_pipeline.sh pipeline.conf
 ```
 
-The configuration file is read with `source`, i.e. interpreted as Bash:
-quote values containing spaces, and keep `job_id` to letters, digits, dot,
-dash and underscore (it is used as a path prefix; the pipeline validates
-this and refuses anything else). Paths themselves must not contain spaces
-or commas - sample and file lists are comma-separated, and most path
-values are re-joined into such lists.
-
 Results are written to `<work_dir>/jobs/<job_id>/final/`, with
 `<job_id>_peptide_summary.xlsx` as the principal deliverable. Interrupted or
 parameter-modified runs resume from the work directory: every stage records
 a fingerprint of exactly the parameters and inputs its outputs depend on
 (the STAR index additionally validates `sjdbOverhang` against
-`read_length` and the genome/GTF identity), and freshness checks cascade -
+`read_length` and the genome/GTF identity), and freshness checks cascade:
 any change that can affect results reruns the affected stage and everything
 downstream of it. Pure performance knobs (`threads`, `dl_rate_limit`,
 `status_cols`) do not trigger reruns since they cannot change results.
-
-Terminal output follows one convention across the Bash driver and the
-Python helpers: 4-character tags (`OK`, `RUN`, `SKIP`, `HAVE`, `INFO`,
-`WARN`, `FAIL`) followed by two spaces, indented notes, boxed stage
-banners and per-phase progress bars. Every assembled tool command is
-echoed as a `cmd:` line before execution.
 
 An equivalent Docker invocation:
 
@@ -93,7 +80,7 @@ conda environment and on `PATH`; failing that, it is provisioned
 automatically.
 
 Tools already installed on the system are declared in the
-"already-installed software" section of the configuration - the pipeline
+"already-installed software" section of the configuration; the pipeline
 uses those binaries as-is and will not download or install anything for them:
 
 ```ini
@@ -108,7 +95,7 @@ automatically:
 | Component | Automatic provisioning |
 |---|---|
 | DIA-NN 2.6.1 | Downloaded to `<work_dir>/ref/diann/` during Stage 0, after the proteome fetch and in parallel with index construction and alignment; reused by subsequent runs |
-| .NET runtime | Provisioned at Stage 0 alongside DIA-NN (into the conda environment; falls back to `<work_dir>/ref/dotnet/`); needed only when Thermo `.raw` files are present — Bruker `.d` files do not require it. The major version is auto-detected from DIA-NN's `RawWrapper.runtimeconfig.json` (default 8.0) and channels install side by side. A distro-packaged `dotnet` without the wanted major triggers the pinned installation, and `DOTNET_ROOT` is always exported pointing at the directory that hosts the runtime (`host/fxr/…`) — pointing it at the bare `dotnet` binary or leaving it unset is what produces `hostfxr init failed: 0x80008096`. On a Stage-4 search failure with `.raw` inputs the pipeline installs a clean pinned runtime and retries the search once |
+| .NET runtime | Provisioned at Stage 0 alongside DIA-NN (into the conda environment; falls back to `<work_dir>/ref/dotnet/`); needed only when Thermo `.raw` files are present, since Bruker `.d` files do not require it. The major version is auto-detected from DIA-NN's `RawWrapper.runtimeconfig.json` (default 8.0) and channels install side by side. A distro-packaged `dotnet` without the wanted major triggers the pinned installation, and `DOTNET_ROOT` is always exported pointing at the directory that hosts the runtime (`host/fxr/…`); pointing it at the bare `dotnet` binary or leaving it unset is what produces `hostfxr init failed: 0x80008096`. On a Stage-4 search failure with `.raw` inputs the pipeline installs a clean pinned runtime and retries the search once |
 | STAR and rMATS | Provided by the conda environment; the STAR version is verified at startup (2.7.10b is fixed internally and is not a user setting) |
 | BioSpliceView | Installed with the conda environment |
 | Background proteome | Downloaded from the project mirror (mouse: 17,283 reviewed entries; human: 20,431) to `<work_dir>/ref/uniprot_<species>.fasta` |
@@ -134,33 +121,17 @@ Alternatively, explicit comma-separated `R1:R2` lists may be supplied via
 discovery.
 
 **Read-length detection and adapter check.** Stage 0 samples the first
-10,000 records of one FASTQ per group: the most common read length feeds
-rMATS and the STAR index overhang (variable-length, e.g. pre-trimmed data
-is handled automatically, and the two groups must agree), and the sampled
-reads are screened for TruSeq/Nextera adapter seeds and trailing
-polyA/polyG tails. Above 5% contamination the pipeline recommends
-pre-trimming (fastp/cutadapt) - untrimmed reads cost junction sensitivity,
-which is exactly what rMATS quantifies. Trimmed FASTQs replace the
-originals transparently and the parameter fingerprints trigger the
-appropriate rebuilds.
+10,000 records of one FASTQ per group to auto-detect the read length
+(which sets the rMATS `readLength` and the STAR index overhang) and to
+screen for TruSeq/Nextera adapter or polyA/polyG contamination, warning
+above 5% so the data can be pre-trimmed with fastp/cutadapt.
 
 ## Example data
 
-Publicly available paired-end RNA-seq datasets with two condition groups are
-suitable for evaluation; two replicates per group complete within
-approximately one hour:
-
-- **SRP111619** — mouse macrophages, IL-10 knockout versus wild type.
-  FASTQ files can be obtained with the
-  [SRA Toolkit](https://github.com/ncbi/sra-tools)
-  (`fasterq-dump --split-files`) and renamed to the `WT-*` / `KO-*` scheme
-  described above.
-- **GSE133399** — mouse liver RNA-seq with substantial alternative splicing
-  (GEO); the same renaming applies.
-
-Stage 4 additionally requires mass-spectrometry acquisitions (Bruker `.d` or
-Thermo `.raw`) from matching conditions, placed in the directory given by
-`ms_dir`.
+The RNA sequencing dataset was obtained from GEO (GSE264294) and the
+proteome dataset from ProteomeXchange (PXD051806); place the FASTQ files
+under `fastq_dir` using the `WT-*` / `KO-*` naming scheme described above,
+and the mass-spectrometry acquisitions under `ms_dir`.
 
 ## Work directory
 
@@ -228,17 +199,17 @@ with the library-relevant subset (`--threads --verbose --met-excision
 --max-pr-charge --cut --missed-cleavages --unimod4`). Passing the search-
 only flags to 4a is at best redundant and at worst pathological (with
 `--semi` the in-silico digest balloons, stretching 4a from minutes to
-hours). To set the 4a flags directly, use `diann_lib_params` - that string
+hours). To set the 4a flags directly, use `diann_lib_params`; that string
 is passed verbatim to the library pass instead of the auto-derived subset
 (the pipeline still appends `--fasta`, `--out-lib` and the core library
 flags `--fasta-search --gen-spec-lib --predictor`; include `--threads`
 yourself). Changing it reruns 4a on resume; unset keeps the
-auto-derivation. Note that MBR requires at least two input files - with a
+auto-derivation. Note that MBR requires at least two input files; with a
 single acquisition DIA-NN reports "MBR turned off".
 
 Each assembled command is echoed as a `cmd:` line before execution, so the
 effective DIA-NN invocation is fully transparent. During 4b the live
-progress counts FILES - DIA-NN first pre-processes every input, then
+progress counts files: DIA-NN first pre-processes every input, then
 analyses them, and the bar reports each phase separately (e.g.
 `3/6 pre-processing` switching to `1/6 analysis`). A file is counted only
 once it FINISHES (the in-flight file is excluded), so the bar holds at
@@ -264,22 +235,22 @@ back to a built-in default.
 
 | Key | Stage | Description | Default |
 |---|---|---|---|
-| `mode` | — | `splicing` (Stages 1–2) or `full` (Stages 1–5); the `PIPELINE_MODE` environment variable takes precedence | `splicing` |
-| `work_dir` | all | output root; holds `ref/`, `jobs/`, `logs/` | — |
-| `gtf` / `genome_fa` | 1–3 | reference annotation and genome; one genome build throughout | — |
-| `fastq_dir` | 1 | FASTQ directory; samples are paired by `<group>` prefix | — |
-| `group1` / `group2` | 1, 4, 5 | group names, used as sample filename prefixes | — |
+| `mode` | all | `splicing` (Stages 1–2) or `full` (Stages 1–5); the `PIPELINE_MODE` environment variable takes precedence | `splicing` |
+| `work_dir` | all | output root; holds `ref/`, `jobs/`, `logs/` | none |
+| `gtf` / `genome_fa` | 1–3 | reference annotation and genome; one genome build throughout | none |
+| `fastq_dir` | 1 | FASTQ directory; samples are paired by `<group>` prefix | none |
+| `group1` / `group2` | 1, 4, 5 | group names, used as sample filename prefixes | none |
 | `group1_samples` / `group2_samples` | 1 | explicit `R1:R2` lists; override prefix discovery | auto |
-| `threads` / `job_id` | all | worker threads (rMATS, the STAR index build and the default `diann_params` string) / output prefix (letters, digits, dot, dash, underscore) | 16 / — |
+| `threads` / `job_id` | all | worker threads (rMATS, the STAR index build and the default `diann_params` string) / output prefix (letters, digits, dot, dash, underscore) | 16 / none |
 | `read_type` / `read_length` | 1 | rMATS library type and read length (`auto` detects it from the FASTQ files; an explicit value is cross-checked against the data) | `paired` / `auto` |
 | `fdr` / `psi` / `minjc` | 2 | BioSpliceView event filters | 0.05 / 0.05 / 10 |
-| `species` | 3 | background proteome species (`mouse` or `human`) | — |
-| `uniprot_fasta` | 3 | explicit background FASTA; overrides `species` | — |
+| `species` | 3 | background proteome species (`mouse` or `human`) | none |
+| `uniprot_fasta` | 3 | explicit background FASTA; overrides `species` | none |
 | `min_aa` | 3 | minimum splice-protein length in amino acids | 10 |
 | `bsv_sheet` | 3 | BioSpliceView results sheet consumed by Stage 3 | `All_Significant` |
-| `ms_dir` | 4 | directory of MS raw files (`.d` / `.raw`) | — |
+| `ms_dir` | 4 | directory of MS raw files (`.d` / `.raw`) | none |
 | `group1_ms_files` / `group2_ms_files` | 4 | explicit MS file lists; override prefix discovery | auto |
-| `group1_dia_ms_files` / `group2_dia_ms_files` | 4 | explicit DIA file lists for the DDA-aided workflow (passed as `--f-dia`); require `--dda` in `diann_params`; never auto-discovered and excluded from the DDA set | — |
+| `group1_dia_ms_files` / `group2_dia_ms_files` | 4 | explicit DIA file lists for the DDA-aided workflow (passed as `--f-dia`); require `--dda` in `diann_params`; never auto-discovered and excluded from the DDA set | none |
 | `diann_bin` | 4 | DIA-NN binary (auto-installed when unset; version pinned internally at 2.6.1) | 2.6.1 |
 | `diann_params` | 4 | DIA-NN tuning flags, passed verbatim to both commands | built-in defaults |
 | `diann_lib_params` | 4 | explicit library-pass (4a) flags, used verbatim; unset = auto-derived from `diann_params` | auto |
