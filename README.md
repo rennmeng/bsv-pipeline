@@ -321,9 +321,3 @@ detecting group (`Detection_Pattern=Single_group_all`). The resulting
 `*_peptide_summary.xlsx` is intended as an exploratory candidate screen;
 candidate splice peptides warrant targeted mass spectrometry or synthetic
 peptide validation.
-
-## License
-
-The DIA-NN release package is distributed under an academic license; consult
-dia-nn.com regarding commercial use. The pipeline code is provided under the
-repository license.
