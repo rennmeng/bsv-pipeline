@@ -65,9 +65,13 @@ values are re-joined into such lists.
 
 Results are written to `<work_dir>/jobs/<job_id>/final/`, with
 `<job_id>_peptide_summary.xlsx` as the principal deliverable. Interrupted or
-parameter-modified runs resume from the work directory: completed stages are
-detected and skipped, so rerunning the same command continues where the
-previous run left off.
+parameter-modified runs resume from the work directory: every stage records
+a fingerprint of exactly the parameters and inputs its outputs depend on
+(the STAR index additionally validates `sjdbOverhang` against
+`read_length` and the genome/GTF identity), and freshness checks cascade -
+any change that can affect results reruns the affected stage and everything
+downstream of it. Pure performance knobs (`threads`, `dl_rate_limit`,
+`status_cols`) do not trigger reruns since they cannot change results.
 
 Terminal output follows one convention across the Bash driver and the
 Python helpers: 4-character tags (`OK`, `RUN`, `SKIP`, `HAVE`, `INFO`,
@@ -128,6 +132,17 @@ listed at Stage 0 for verification; an unpaired R1 aborts the run.
 Alternatively, explicit comma-separated `R1:R2` lists may be supplied via
 `group1_samples` / `group2_samples`, which take precedence over prefix
 discovery.
+
+**Read-length detection and adapter check.** Stage 0 samples the first
+10,000 records of one FASTQ per group: the most common read length feeds
+rMATS and the STAR index overhang (variable-length, e.g. pre-trimmed data
+is handled automatically, and the two groups must agree), and the sampled
+reads are screened for TruSeq/Nextera adapter seeds and trailing
+polyA/polyG tails. Above 5% contamination the pipeline recommends
+pre-trimming (fastp/cutadapt) - untrimmed reads cost junction sensitivity,
+which is exactly what rMATS quantifies. Trimmed FASTQs replace the
+originals transparently and the parameter fingerprints trigger the
+appropriate rebuilds.
 
 ## Example data
 
@@ -225,8 +240,10 @@ Each assembled command is echoed as a `cmd:` line before execution, so the
 effective DIA-NN invocation is fully transparent. During 4b the live
 progress counts FILES - DIA-NN first pre-processes every input, then
 analyses them, and the bar reports each phase separately (e.g.
-`3/6 pre-processing` switching to `1/6 analysis`), so six files never
-inflate into twelve merged "passes".
+`3/6 pre-processing` switching to `1/6 analysis`). A file is counted only
+once it FINISHES (the in-flight file is excluded), so the bar holds at
+`5/6` while the last file is still being analysed instead of sitting at a
+misleading 100%; six files never inflate into twelve merged "passes".
 
 ## Version pinning
 
@@ -254,7 +271,7 @@ back to a built-in default.
 | `group1` / `group2` | 1, 4, 5 | group names, used as sample filename prefixes | — |
 | `group1_samples` / `group2_samples` | 1 | explicit `R1:R2` lists; override prefix discovery | auto |
 | `threads` / `job_id` | all | worker threads (rMATS, the STAR index build and the default `diann_params` string) / output prefix (letters, digits, dot, dash, underscore) | 16 / — |
-| `read_type` / `read_length` | 1 | rMATS library type and read length | `paired` / 150 |
+| `read_type` / `read_length` | 1 | rMATS library type and read length (`auto` detects it from the FASTQ files; an explicit value is cross-checked against the data) | `paired` / `auto` |
 | `fdr` / `psi` / `minjc` | 2 | BioSpliceView event filters | 0.05 / 0.05 / 10 |
 | `species` | 3 | background proteome species (`mouse` or `human`) | — |
 | `uniprot_fasta` | 3 | explicit background FASTA; overrides `species` | — |

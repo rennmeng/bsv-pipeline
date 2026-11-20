@@ -848,10 +848,11 @@ threads="${threads:-16}"
 [[ "$threads" =~ ^[0-9]+$ ]] || die "threads must be an integer (got: $threads)"
 min_aa="${min_aa:-10}"
 p_cutoff="${p_cutoff:-0.05}"
-read_type="${read_type:-paired}"; read_length="${read_length:-150}"
+read_type="${read_type:-paired}"; read_length="${read_length:-auto}"
 [[ "$read_type" == "paired" || "$read_type" == "single" ]] \
     || die "read_type must be 'paired' or 'single' (got: $read_type)"
-[[ "$read_length" =~ ^[0-9]+$ ]] || die "read_length must be an integer (got: $read_length)"
+[[ "$read_length" == "auto" || "$read_length" =~ ^[0-9]+$ ]] \
+    || die "read_length must be 'auto' or an integer (got: $read_length)"
 fdr="${fdr:-0.05}"; psi="${psi:-0.05}"; minjc="${minjc:-10}"
 # per-transfer download rate cap consumed by the fetch scripts
 # (config: dl_rate_limit; unset -> 2 MB/s like curl --limit-rate 2m,
@@ -883,9 +884,12 @@ mkdir -p "$REF_DIR" "$JOB_DIR"
 # Serialize ref/ provisioning (proteome, STAR index, DIA-NN) across jobs
 # sharing this work_dir. flock releases automatically when the holder
 # exits or crashes; without flock (e.g. macOS) we proceed unlocked.
+# NB: exec redirections PERSIST for the whole shell - never attach a
+# throwaway 2>/dev/null to an exec (it would silence stderr permanently);
+# writability is checked separately instead.
 REF_LOCKED=0
 if command -v flock >/dev/null 2>&1; then
-    if exec 9>>"$REF_DIR/.ref.lock" 2>/dev/null && flock -w 600 9 2>/dev/null; then
+    if [[ -w "$REF_DIR" ]] && exec 9>>"$REF_DIR/.ref.lock" && flock -w 600 9; then
         REF_LOCKED=1
     else
         warn "Could not lock $REF_DIR within 10 min - continuing unlocked (avoid two jobs on the same work_dir at once)"
@@ -925,7 +929,91 @@ else
     have "Background proteome not required (PIPELINE_MODE=splicing)"
 fi
 
-# --- 0b STAR: locate, then verify the pinned version ---
+# --- 0b rMATS sample resolution (explicit lists win; else prefix discovery),
+#     then read-length auto-detection - both must precede the STAR index,
+#     whose sjdbOverhang derives from the read length ---
+group1_samples="$(resolve_group "$group1" "${group1_samples:-}")"
+group2_samples="$(resolve_group "$group2" "${group2_samples:-}")"
+
+fastq_len_stats() {  # fastq_len_stats <fastq>: "<mode> <max> <ad> <n>" over
+    local f="$1"     # the first 10k records; mode/max = read lengths,
+                     # ad/n = reads carrying adapter or polyA/polyG tails
+                     # (TruSeq / Nextera seeds, trailing A>=15 or G>=20)
+    [[ -s "$f" ]] || { echo ""; return 0; }
+    case "$f" in
+        *.gz|*.GZ)  gzip -dc -- "$f" 2>/dev/null ;;
+        *.bz2|*.BZ2) bzip2 -dc -- "$f" 2>/dev/null ;;
+        *.xz|*.XZ)  xz -dc -- "$f" 2>/dev/null ;;
+        *)          cat -- "$f" 2>/dev/null ;;
+    esac | awk '
+        NR % 4 == 2 {
+            n++; s = $0; L[length(s)]++
+            if (index(s, "AGATCGGAAGAGC") > 0 ||          # TruSeq
+                index(s, "CTGTCTCTTATACACATCT") > 0) ad++ # Nextera
+            t = s; gsub(/A+$/, "", t); if (length(s) - length(t) >= 15) ad++
+            t = s; gsub(/G+$/, "", t); if (length(s) - length(t) >= 20) ad++
+            if (n >= 10000) exit
+        }
+        END {
+            mx = 0; md = 0; mc = 0
+            for (l in L) { if (L[l] > mc) { mc = L[l]; md = l + 0 }; if (l + 0 > mx) mx = l + 0 }
+            if (mc > 0) print md, mx, ad + 0, n + 0
+        }' || true
+}
+first_fastq() {  # first_fastq <sample-list>: first R1 of the first replicate
+    local p="${1%%,*}"
+    echo "${p%%:*}"
+}
+if [[ "$read_length" == "auto" ]]; then
+    g1_r1="$(first_fastq "$group1_samples")"; g2_r1="$(first_fastq "$group2_samples")"
+    [[ -s "$g1_r1" ]] || die "Cannot auto-detect read_length - FASTQ not found: $g1_r1 (set read_length explicitly in the config)"
+    [[ -s "$g2_r1" ]] || die "Cannot auto-detect read_length - FASTQ not found: $g2_r1 (set read_length explicitly in the config)"
+    run_ "Auto-detecting read length from the FASTQ files"
+    g1_stats="$(fastq_len_stats "$g1_r1")"; g2_stats="$(fastq_len_stats "$g2_r1")"
+    read -r g1_mode g1_max g1_ad g1_n <<< "$g1_stats"
+    read -r g2_mode g2_max g2_ad g2_n <<< "$g2_stats"
+    [[ "$g1_mode" =~ ^[0-9]+$ && "$g2_mode" =~ ^[0-9]+$ ]] \
+        || die "Could not determine read length from $g1_r1 / $g2_r1 (empty, corrupt, or wrapped FASTQ?) - set read_length explicitly in the config"
+    if (( g1_mode != g2_mode )); then
+        die "Groups have different read lengths ($group1: ${g1_mode}bp, $group2: ${g2_mode}bp) - rMATS takes a single readLength; trim/filter the data or set read_length explicitly"
+    fi
+    read_length="$g1_mode"
+    read_max=$(( g1_max > g2_max ? g1_max : g2_max ))
+    if (( read_max > read_length )); then
+        # variable-length reads (e.g. post-trimming): overhang follows the
+        # longest read so junction anchors are not clipped
+        star_want_overhang=$(( read_max - 1 ))
+        warn "Variable read lengths detected (mode ${read_length}bp, max ${read_max}bp) - sjdbOverhang set to $star_want_overhang, rMATS uses readLength=$read_length"
+    else
+        star_want_overhang=$(( read_length - 1 ))
+    fi
+    have "read_length auto-detected: ${read_length}bp (sjdbOverhang=$star_want_overhang, from $(basename "$g1_r1") + $(basename "$g2_r1"))"
+    if (( g1_n > 0 && g2_n > 0 )); then
+        ad_rate=$(( (g1_ad + g2_ad) * 100 / (g1_n + g2_n) ))
+        if (( ad_rate >= 20 )); then
+            warn "adapter/polyA contamination in sampled reads: ${ad_rate}% - strongly consider pre-trimming (fastp/cutadapt); untrimmed reads reduce junction sensitivity for rMATS"
+        elif (( ad_rate >= 5 )); then
+            warn "adapter/polyA contamination in sampled reads: ${ad_rate}% - consider pre-trimming (fastp/cutadapt); trimmed FASTQs are picked up automatically on the next run"
+        fi
+    fi
+else
+    star_want_overhang=$(( read_length - 1 ))
+    # explicit value: still cross-check against the data (cheap, catches
+    # copy-paste config errors that would silently degrade the index)
+    stats="$(fastq_len_stats "$(first_fastq "$group1_samples")")"
+    read -r m mx ad n <<< "$stats"
+    if [[ "$m" =~ ^[0-9]+$ ]] && (( m != read_length )); then
+        warn "config read_length=$read_length but $(first_fastq "$group1_samples") reads are ${m}bp - check the setting (index overhang stays $star_want_overhang)"
+    fi
+    if [[ "${ad:-0}" =~ ^[0-9]+$ && "${n:-0}" -gt 0 ]]; then
+        ad_rate=$(( ad * 100 / n ))
+        if (( ad_rate >= 5 )); then
+            warn "adapter/polyA contamination in sampled reads: ${ad_rate}% - consider pre-trimming (fastp/cutadapt)"
+        fi
+    fi
+fi
+
+# --- 0c STAR: locate, then verify the pinned version ---
 star_version="${star_version:-2.7.10b}"   # pinned version; empty skips the check
 star_bin="${star_bin:-}"
 if [[ -z "$star_bin" && -n "${rmats_py:-}" ]]; then
@@ -960,11 +1048,62 @@ star_index="${star_index:-$REF_DIR/star_index}"
 star_index_ok() {  # the files STAR needs before it can even load a genome
     [[ -s "$1/genomeParameters.txt" && -s "$1/Genome" && -s "$1/SA" ]]
 }
+# identity of the inputs an index was built from: file size + mtime of the
+# genome FASTA and GTF, plus the sjdbOverhang the library read length
+# demands. Recorded in <index>/.bsv_params at build time; a cached index is
+# only reused when the CURRENT inputs still match - a stale index built
+# with another read length / another genome must never silently serve a
+# new job. star_want_overhang was computed by the read-length detection step.
+star_input_fp() {  # star_input_fp: prints the current-inputs fingerprint
+    local a b
+    a="$(stat -c '%s,%Y' "$genome_fa" 2>/dev/null || echo unknown)"
+    b="$(stat -c '%s,%Y' "$gtf" 2>/dev/null || echo unknown)"
+    echo "fa=$a gtf=$b"
+}
+star_index_mismatch() {  # star_index_mismatch <index>: prints a reason or nothing
+    local dir="$1" idx_oh fp saved
+    idx_oh="$(awk -F'\t' '/^sjdbOverhang[ \t]/{print $2; exit}' "$dir/genomeParameters.txt" 2>/dev/null | tr -d '[:space:]')"
+    if [[ ! "$idx_oh" =~ ^[0-9]+$ ]]; then
+        echo "sjdbOverhang not recorded in genomeParameters.txt (cannot verify read length)"
+        return 0
+    fi
+    if (( idx_oh != star_want_overhang )); then
+        echo "index was built with sjdbOverhang=$idx_oh (read length $((idx_oh + 1))), but the config sets read_length=$read_length (needs $star_want_overhang)"
+        return 0
+    fi
+    fp="$(star_input_fp)"
+    if [[ "$fp" == *unknown* ]]; then
+        return 1   # inputs cannot be stat'd - skip the fingerprint check
+    fi
+    if [[ -s "$dir/.bsv_params" ]]; then
+        saved="$(cat "$dir/.bsv_params" 2>/dev/null || true)"
+        if [[ "$saved" != *"$fp"* ]]; then
+            echo "genome FASTA / GTF changed since the index was built (size+mtime fingerprint differs)"
+            return 0
+        fi
+    else
+        echo "no .bsv_params fingerprint (index was not built by this pipeline, or an older run)"
+    fi
+    return 1
+}
+index_reuse_issue=""
 if [[ -d "$star_index" ]] && star_index_ok "$star_index"; then
-    have "STAR index ready, skipping build ($star_index)"
-else
+    index_reuse_issue="$(star_index_mismatch "$star_index" || true)"
+    if [[ -z "$index_reuse_issue" ]]; then
+        have "STAR index ready, skipping build ($star_index)"
+    else
+        warn "Cached STAR index does NOT match the current configuration - rebuilding: $index_reuse_issue"
+    fi
+elif [[ -d "$star_index" ]]; then
+    warn "Existing STAR index is incomplete (likely an interrupted build) - rebuilding it now; the finished index will be cached"
+    index_reuse_issue="incomplete index"
+fi
+if [[ ! -d "$star_index" || -n "$index_reuse_issue" ]]; then
+    # never genomeGenerate over a directory that still holds files: move the
+    # stale index aside first (instant rename), delete it after a verified
+    # rebuild; on failure it survives for manual recovery
     if [[ -d "$star_index" ]]; then
-        warn "Existing STAR index is incomplete (likely an interrupted build) - rebuilding it now; the finished index will be cached"
+        mv "$star_index" "${star_index}.stale.$$"
     fi
     run_ "Building STAR index (first run: 10-30 min; reused afterwards)"
     STAR_CK="{ for f in genomeParameters.txt Genome sjdbList.out.tab SA; do [ -e '$star_index/'\$f ] && echo x; done; ls '$star_index'/genomeSAsuffix.* >/dev/null 2>&1 && echo x; true; } | wc -l"
@@ -972,16 +1111,20 @@ else
     STREAM_FILTER="^[A-Z][a-z]{2} [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2}|EXITING|FATAL" \
     STREAM_WATCH_DIR="$star_index" \
     run_streamed "$REF_DIR/star_index_build.log" \
-        env STAR_BIN="$star_bin" READ_LENGTH_OVERRIDE="$(( read_length - 1 ))" \
+        env STAR_BIN="$star_bin" READ_LENGTH_OVERRIDE="$star_want_overhang" \
         bash "$SCRIPT_DIR/scripts/build_star_index.sh" \
             "$genome_fa" "$gtf" "$star_index" "$threads" \
-    || die "STAR index build failed — see $REF_DIR/star_index_build.log"
+    || die "STAR index build failed — see $REF_DIR/star_index_build.log (the previous index was moved to ${star_index}.stale.$$)"
     star_index_ok "$star_index" \
         || die "STAR index build reported success but validation fails on $star_index - check permissions (ls -la) and $REF_DIR/star_index_build.log"
-    ok "STAR index built ($star_index)"
+    printf 'overhang=%s %s\n' "$star_want_overhang" "$(star_input_fp)" > "$star_index/.bsv_params"
+    if [[ -d "${star_index}.stale.$$" ]]; then
+        rm -rf "${star_index}.stale.$$"
+    fi
+    ok "STAR index built ($star_index, overhang=$star_want_overhang)"
 fi
 
-# --- 0c Environment preflight (fail fast) ---
+# --- 0d Environment preflight (fail fast) ---
 # python for the helper scripts (merge_db.py / summarize_splice_peptides.py):
 # they import pandas, so candidates are validated by CAPABILITY - the first
 # interpreter that can actually import pandas wins. Automatic order: the
@@ -1044,10 +1187,6 @@ else
     fi
     have "BioSpliceView ready ($BSV_BIN)"
 fi
-
-# --- 0d rMATS sample resolution (explicit lists win; else prefix discovery) ---
-group1_samples="$(resolve_group "$group1" "${group1_samples:-}")"
-group2_samples="$(resolve_group "$group2" "${group2_samples:-}")"
 
 # --- 0e MS raw files: filename-agnostic ---
 # whatever is in ms_dir is used as-is: sorted order, the first N1 files
@@ -1170,7 +1309,7 @@ ok "Resources and environment ready"
 stage_end
 
 if (( REF_LOCKED )); then
-    exec 9>&- 2>/dev/null || true   # ref/ provisioning done - release the lock
+    exec 9>&-   # ref/ provisioning done - release the lock (fd 9 is open here)
 fi
 
 # ------------------------------------------------------------
@@ -1275,7 +1414,7 @@ stage_end
 banner "2/$STAGE_TOTAL" "BioSpliceView event annotation" "CDS reconstruction / NMD / GenBank" "BioSpliceView"
 # ============================================================
 stage_begin
-bsv_fp_text="fdr=$fdr psi=$psi minjc=$minjc | $rmats_fp_text"
+bsv_fp_text="fdr=$fdr psi=$psi minjc=$minjc bsv=${bsv_repo:-pip} | $rmats_fp_text"
 bsv_valid=0
 if [[ -f "$BSV_XLSX" && -f "$BSV_DIR/.params" ]] \
    && [[ "$(cat "$BSV_DIR/.params" 2>/dev/null)" == "$bsv_fp_text" ]]; then
@@ -1323,13 +1462,14 @@ banner "3/$STAGE_TOTAL" "Search database" "UniProt background + splice-derived p
 stage_begin
 bsv_sheet="${bsv_sheet:-All_Significant}"
 DB_FP="$DB_DIR/.params"
-db_fp_text="fdr=$fdr psi=$psi minjc=$minjc min_aa=$min_aa sheet=$bsv_sheet prot=$(basename "$uniprot_fasta")"
+db_fp_text="fdr=$fdr psi=$psi minjc=$minjc min_aa=$min_aa sheet=$bsv_sheet prot=$uniprot_fasta|$(stat -c '%s,%Y' "$uniprot_fasta" 2>/dev/null || echo na)"
 if [[ -f "$COMBINED_FA" && -f "$ANNOT_TSV" ]]; then
-    if [[ -f "$DB_FP" && "$(cat "$DB_FP" 2>/dev/null)" != "$db_fp_text" ]]; then
-        warn "Stage 3 parameters changed - rebuilding the search database"
-        rm -f "$COMBINED_FA" "$ANNOT_TSV"
-    else
+    if [[ -f "$DB_FP" && "$(cat "$DB_FP" 2>/dev/null)" == "$db_fp_text" ]] \
+       && ! [[ "$BSV_XLSX" -nt "$COMBINED_FA" ]]; then
         skip "$COMBINED_FA"
+    else
+        warn "Stage 3 parameters or BioSpliceView results changed - rebuilding the search database"
+        rm -f "$COMBINED_FA" "$ANNOT_TSV"
     fi
 fi
 if [[ ! -f "$COMBINED_FA" || ! -f "$ANNOT_TSV" ]]; then
@@ -1352,14 +1492,15 @@ banner "4/$STAGE_TOTAL" "DIA-NN search" "$diann_mode_txt + DIA quantification" "
 stage_begin
 LIB_FP="$DIANN_DIR/.lib_params"
 SEARCH_FP="$DIANN_DIR/.search_params"
-lib_fp_text="db:$db_fp_text | v$diann_version | $diann_params | lib=${diann_lib_params:-}"
+lib_fp_text="db:$db_fp_text | v$diann_version bin=$diann_bin | $diann_params | lib=${diann_lib_params:-}"
 search_fp_text="$lib_fp_text | ms1=$group1_ms_files ms2=$group2_ms_files | dia1=${group1_dia_ms_files:-} dia2=${group2_dia_ms_files:-}"
 if [[ -f "$PR_MATRIX" ]]; then
-    if [[ -f "$SEARCH_FP" && "$(cat "$SEARCH_FP" 2>/dev/null)" != "$search_fp_text" ]]; then
-        warn "DIA-NN parameters or MS inputs changed - rerunning the search"
-        rm -f "$PR_MATRIX"
-    else
+    if [[ -f "$SEARCH_FP" && "$(cat "$SEARCH_FP" 2>/dev/null)" == "$search_fp_text" ]] \
+       && ! [[ "$SPECLIB" -nt "$PR_MATRIX" || "$COMBINED_FA" -nt "$PR_MATRIX" ]]; then
         skip "$PR_MATRIX"
+    else
+        warn "DIA-NN parameters, MS inputs or upstream outputs changed - rerunning the search"
+        rm -f "$PR_MATRIX"
     fi
 fi
 if [[ ! -f "$PR_MATRIX" ]]; then
@@ -1375,7 +1516,18 @@ if [[ ! -f "$PR_MATRIX" ]]; then
     done
     if [[ "$HAS_RAW" == "1" ]]; then provision_dotnet; fi
 
-    if [[ ! -s "$SPECLIB" ]]; then
+    # 4a resume gate: the library is reused only when it exists AND its
+    # recorded fingerprint matches AND it is not older than the search
+    # database it was predicted from (a Stage-3 rebuild must cascade here)
+    lib_valid=0
+    if [[ -s "$SPECLIB" && -f "$LIB_FP" && "$(cat "$LIB_FP" 2>/dev/null)" == "$lib_fp_text" ]] \
+       && ! [[ "$COMBINED_FA" -nt "$SPECLIB" ]]; then
+        lib_valid=1
+    fi
+    if (( lib_valid )); then
+        skip "Spectral library exists ($SPECLIB)"
+    else
+        [[ -s "$SPECLIB" ]] && warn "Search database or library parameters changed - regenerating the spectral library"
         run_ "4a Predicted spectral library (log: $DIANN_DIR/diann_lib.log)"
         # 4a flags: an explicit diann_lib_params is used verbatim (the file
         # arguments below are appended either way); otherwise derive from
@@ -1413,8 +1565,6 @@ if [[ ! -f "$PR_MATRIX" ]]; then
             || die "DIA-NN library generation failed - see $DIANN_DIR/diann_lib.log"
         [[ -s "$SPECLIB" ]] || die "DIA-NN library generation finished but $SPECLIB is missing"
         printf '%s\n' "$lib_fp_text" > "$LIB_FP"
-    else
-        skip "Spectral library exists ($SPECLIB)"
     fi
     if [[ "$diann_params" == *"--dda"* ]]; then
         run_ "4b DDA-aided search (log: $DIANN_DIR/diann_search.log)"
@@ -1451,7 +1601,11 @@ if [[ ! -f "$PR_MATRIX" ]]; then
     diann_run_search() {  # one streamed 4b attempt (env may change between attempts)
         STREAM_FILTER="pre-processing|analys|error|warn" STREAM_HEARTBEAT=60 STREAM_WATCH_DIR="$DIANN_DIR" \
         STREAM_TOTAL=$N_MS STREAM_UNIT="files" \
-        STREAM_COUNT_CMD="{ _pp=\$(grep -c 'Pre-processing' '$DIANN_DIR/diann_search.log' 2>/dev/null || true); _an=\$(grep -c 'Analys' '$DIANN_DIR/diann_search.log' 2>/dev/null || true); if [[ \$_an -gt 0 ]]; then echo \"\$_an:analysis\"; else echo \"\$_pp:pre-processing\"; fi; }" \
+        # count COMPLETED files, not started ones: DIA-NN prints
+        # "Pre-processing/Analysing file k" when it STARTS file k, so the
+        # in-flight file is subtracted - during the last file the bar holds
+        # at (N-1)/N instead of lying at 100% for the whole final analysis
+        STREAM_COUNT_CMD="{ _pp=\$(grep -c 'Pre-processing' '$DIANN_DIR/diann_search.log' 2>/dev/null || true); _an=\$(grep -c 'Analys' '$DIANN_DIR/diann_search.log' 2>/dev/null || true); if [[ \$_an -gt 0 ]]; then _d=\$((_an - 1)); _l='analysis'; else _d=\$((_pp - 1)); _l='pre-processing'; fi; (( _d < 0 )) && _d=0; echo \"\$_d:\$_l\"; }" \
         run_streamed "$DIANN_DIR/diann_search.log" "$diann_bin" "${search_args[@]}"
     }
     if diann_run_search; then
